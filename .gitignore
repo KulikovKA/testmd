@@ -1,0 +1,31 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Python artifacts (the implementation stack is finalized in TASK-001)
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Runtime-owned state
+.runtime/
+workspaces/
+sessions/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Build and test output
+build/
+dist/
+*.egg-info/
+htmlcov/
+.coverage
