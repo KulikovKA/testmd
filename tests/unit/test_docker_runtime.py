@@ -6,6 +6,7 @@ from universal_agent_runtime.adapters.docker_runtime import (
     DockerRuntime,
     DockerWorkload,
 )
+from universal_agent_runtime.application.ports.runtime_values import NetworkDestination
 
 
 def test_workload_requires_explicit_safe_settings() -> None:
@@ -17,6 +18,31 @@ def test_workload_requires_explicit_safe_settings() -> None:
         DockerWorkload("image", ("run",), "")
     with pytest.raises(ValueError):
         DockerWorkload("image", ("run",), "65534", "relative")
+    with pytest.raises(ValueError):
+        DockerWorkload("image", ("run",), "65534", network_mode="host")
+    with pytest.raises(ValueError):
+        DockerWorkload("image", ("run",), "65534", network_mode="bridge")
+    with pytest.raises(ValueError):
+        DockerWorkload(
+            "image",
+            ("run",),
+            "65534",
+            network_destinations=(NetworkDestination("host.docker.internal", 11434),),
+        )
+
+
+def test_bridge_workload_requires_exact_deployment_network() -> None:
+    destination = NetworkDestination("host.docker.internal", 11434)
+    workload = DockerWorkload(
+        "image",
+        ("run",),
+        "65534",
+        network_mode="bridge",
+        network_destinations=(destination,),
+    )
+
+    assert workload.network_mode == "bridge"
+    assert workload.network_destinations == (destination,)
 
 
 def test_driver_requires_a_workload_catalog() -> None:

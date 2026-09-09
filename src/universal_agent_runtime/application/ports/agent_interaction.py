@@ -19,7 +19,15 @@ class AgentInteraction(Protocol):
         ...
 
     async def turn(self, request: TurnRequest) -> TurnResult:
-        """Run one turn without silently replacing missing Session state."""
+        """Run one turn without silently replacing missing Session state.
+
+        Callers serialize turns per Agent. Successful results commit exactly one
+        consecutive turn. INFERENCE_UNAVAILABLE, TIMEOUT, VALIDATION_FAILED and
+        TOOL_FAILED guarantee no committed turn and safe reuse of the same
+        Session. Adapters must restore native state before raising these codes;
+        indeterminate outcomes use a fatal state/protocol/operation failure.
+        Tools are currently disabled; no external tool-write rollback is claimed.
+        """
         ...
 
     async def delete_session(self, reference: SessionReference) -> DeleteSessionResult:

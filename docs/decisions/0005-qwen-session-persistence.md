@@ -53,9 +53,11 @@ execution remain inside `QwenSessionAdapter`.
   the explicit PoC history limit is reached. Compression/retention policy is a
   later design concern and cannot silently truncate context.
 * The Orchestrator must serialize turns and persist the generic
-  `SessionReference`; those responsibilities remain in TASK-009/TASK-010.
-* Runtime stop/start wiring is not implied by adapter reopening and remains a
-  later integration criterion.
+  `SessionReference`; TASK-009 now coordinates Session create/delete with Agent
+  lifecycle; TASK-010 defines process-local public message commits and recovery
+  in [ADR-0006](0006-public-chat-commit-and-recovery.md).
+* TASK-010 verifies public multi-turn continuity across runtime stop/start;
+  durable Orchestrator metadata recovery remains NOT VERIFIED.
 
 ## Rejected alternatives
 

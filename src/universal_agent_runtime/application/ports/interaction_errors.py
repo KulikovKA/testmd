@@ -23,6 +23,8 @@ class InteractionErrorCode(str, Enum):
     PROTOCOL_FAILURE = "protocol_failure"
     OPERATION_FAILED = "operation_failed"
     CLEANUP_FAILED = "cleanup_failed"
+    VALIDATION_FAILED = "validation_failed"
+    TOOL_FAILED = "tool_failed"
 
 
 class InteractionFailure(Exception):

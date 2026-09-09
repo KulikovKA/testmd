@@ -1,15 +1,19 @@
 # Состояние проекта
 
-Последнее обновление: 2026-09-09 после завершения TASK-005.
+Last updated: 2026-09-09 after completing TASK-011.
 
 ## Текущий статус
 
-- TASK-000, TASK-001, TASK-002, TASK-003, TASK-004 и TASK-005 имеют статус `DONE`.
-- Ни одна задача не имеет статус `ACTIVE`.
+- TASK-000 through TASK-011 are DONE.
+- No task is ACTIVE. TASK-012 remains TODO; it requires an explicit user instruction.
 - TASK-004 реализует локальный `DockerRuntime` для runtime-neutral порта `AgentRuntime`.
 - TASK-005 добавляет ограниченный исполняемый probe Qwen Code/Ollama, не добавляя conversation/session port в application layer.
-- TASK-006 остаётся `TODO`; следующая задача автоматически не активирована.
-- Agent Orchestrator HTTP API, persistent Qwen session adapter, restricted Task Tool и UI ещё не реализованы.
+- TASK-006 реализует persistent Qwen session adapter за отдельным runtime-neutral портом `AgentInteraction`.
+- TASK-007 добавляет universal Docker agent image и проверенный native Qwen launch/resume через `DockerRuntime`.
+- TASK-008 добавляет HTTP foundation и явный composition root без endpoints жизненного цикла или чата.
+- TASK-009 добавляет Agent lifecycle use cases и HTTP create/inspect/start/stop/delete API без chat behavior.
+- TASK-010 implements JSON chat/history. TASK-011 adds turn-bound SSE with committed response content.
+- JSON chat and SSE event delivery are implemented. Token streaming, restricted Task Tool and UI are not implemented.
 
 ## Работающая функциональность
 
@@ -19,7 +23,7 @@
 - Логический `workload` разрешается через explicit deployment-owned каталог `DockerWorkload`; Docker image, command, user и container path не попадают в application/domain.
 - Каждый Agent получает отдельные container и Docker named volume; backend IDs и SDK objects остаются внутри adapter.
 - CPU, memory и PID limits, environment и runtime-resolved secret bindings отображаются в Docker configuration.
-- Пустой network allowlist создаёт container с `network_mode=none`; непустой allowlist отклоняется с `CONFIGURATION_REJECTED`, потому что базовый Docker не обеспечивает точный destination filtering.
+- Пустой network tuple для default workload создаёт container с `network_mode=none`; local bridge profile разрешён только когда runtime request точно совпадает с deployment-owned `network_destinations`. Docker bridge не считается destination-filtering enforcement.
 - Agent container запускается без privileged mode, со сброшенными capabilities, `no-new-privileges`, read-only root filesystem, ограниченным `tmpfs` и explicit non-root user.
 - Host bind mounts и Docker socket не передаются; writable workspace реализован только как managed named volume.
 - Readiness подтверждается только для running container с Docker health status `healthy`.
@@ -37,17 +41,87 @@
 - Structured outcomes различают invalid configuration, Ollama connection/authentication, unavailable model, Qwen process/protocol и scenario expectation failures.
 - `--resume` повторно использовал тот же `session_id`, но модель 0.6B не воспроизвела случайный token; conversational persistence не заявляется.
 
-Подробности Qwen/Ollama protocol и ограничений находятся в [docs/qwen-ollama-integration.md](docs/qwen-ollama-integration.md), Docker mapping — в [docs/docker-runtime.md](docs/docker-runtime.md), а нейтральная семантика — в [docs/runtime-contract.md](docs/runtime-contract.md).
+Проверено по TASK-006:
+
+- Runtime-neutral порт `AgentInteraction` отделяет `create_session`, `turn` и `delete_session` от lifecycle-контракта `AgentRuntime`.
+- `QwenSessionAdapter` хранит на каждый Agent отдельные manifest, project-owned history, Qwen home, native Qwen chat artifact и workspace.
+- Комбинация native Qwen `session_id`/`--resume` и валидируемой project-owned history сохраняет многотуровый контекст после завершения процесса Qwen и повторного открытия adapter.
+- Missing, corrupt и incompatible state возвращают стабильные diagnostic failures; adapter не запускает новый несвязанный conversation незаметно.
+- Isolation между Agent, отсутствие global mutable Qwen session, явный и идемпотентный cleanup, а также неперсистентность credentials покрыты unit tests.
+- Live integration test на `qwen3:1.7b` объективно восстановил случайное codeword во втором ходе после закрытия и повторного открытия adapter, а затем удалил session artifacts.
+
+Проверено по TASK-007:
+
+- `agent_image/` воспроизводимо собирается из маленького committed build context и строго закреплённого официального Qwen Code `0.23.1` image digest.
+- Image запускает `/usr/local/bin/agent-runtime` от non-root `10001:10001`, использует `/workspace` как единственный writable per-Agent volume и предоставляет нейтральные launcher-команды `serve`, `readiness`, `turn` и `version`.
+- Ollama, model weights, endpoint и credentials не входят в image. Endpoint/model передаются через runtime environment, а `OPENAI_API_KEY` — через `SecretBinding`.
+- Launcher сохраняет native Qwen chat state в workspace volume и имеет явные пустые injection slots `/workspace/.agent/skills` и `/workspace/.agent/tools` без преждевременной реализации их формата или Tool behavior.
+- Opt-in live test создал и запустил image через `DockerRuntime`, выполнил Qwen turn с внешним Ollama, остановил/запустил тот же runtime, возобновил native session UUID и восстановил случайное codeword.
+- Live test проверил read-only root filesystem, dropped capabilities, `no-new-privileges`, non-root user, отсутствие Docker socket, отсутствие Ollama executable/state в image и полное удаление managed container/volume.
+
+Проверено по TASK-008:
+
+- `ApplicationSettings` валидирует обязательную non-secret deployment configuration до создания приложения и допускает только выбранный в composition root `docker` driver.
+- `ApplicationComposition` явно владеет runtime и interaction ports на lifespan одного FastAPI app; deterministic fakes передаются напрямую и закрываются при shutdown без hidden process-global state.
+- `http_api` использует отдельные Pydantic transport schemas и ограничивает OpenAPI surface маршрутами `GET /healthz` и `GET /readyz`, generated `/openapi.json` и `/docs`.
+- Общий redacted error envelope не раскрывает exception details, paths, endpoints, Docker/Qwen output или credentials. На этапе TASK-008 routes для Agent, lifecycle, messages, events и tasks отсутствовали; TASK-009 добавляет только lifecycle surface.
+- Configuration, TestClient и OpenAPI tests проходят без Docker, Ollama или корпоративного service.
+
+Проверено по TASK-009:
+
+- `AgentLifecycleService` реализует create, inspect, start/readiness, stop и delete только через project-owned `AgentRuntime`, `AgentInteraction` и `AgentRepository` ports.
+- `POST /agents` создаёт уникальные Agent/workspace/Session identities и возвращает `STOPPED`; явные URI запуска и остановки — `POST /agents/{agent_id}/start` и `POST /agents/{agent_id}/stop`.
+- Orchestrator владеет переходами `CREATING`, `STARTING`, `READY`, `STOPPING`, `STOPPED`, `FAILED` и не смешивает их с `ExecutionState`/`Readiness` runtime.
+- Required `request_id` обеспечивает idempotent create; conflicting payload, concurrent duplicate operations, invalid state, not-found, readiness timeout и partial cleanup имеют детерминированные результаты.
+- Per-Agent configuration snapshot содержит только safe workload/resources/capability references; runtime handle, endpoints, secret references/values и backend IDs не сериализуются.
+- Stop сохраняет runtime workspace и logical Session. Delete сначала подтверждает runtime cleanup, затем удаляет adapter-owned Session; failure сохраняет record/handle/evidence для retry той же identity.
+- `InMemoryAgentRepository` является явной application-lifetime dependency с deletion/idempotency tombstones; hidden process-global state отсутствует.
+- Реальный Docker integration test через публичный HTTP API запустил universal agent image до `READY`, выполнил stop/start и подтвердил отсутствие container/volume после delete без обращения к Ollama.
+
+Подробности Qwen/Ollama protocol и ограничений находятся в [docs/qwen-ollama-integration.md](docs/qwen-ollama-integration.md), universal image contract — в [docs/agent-image.md](docs/agent-image.md), HTTP foundation — в [docs/orchestrator-api-foundation.md](docs/orchestrator-api-foundation.md), lifecycle HTTP contract — в [docs/agent-lifecycle-api.md](docs/agent-lifecycle-api.md), Docker mapping — в [docs/docker-runtime.md](docs/docker-runtime.md), а нейтральная семантика — в [docs/runtime-contract.md](docs/runtime-contract.md).
+
+Verified TASK-010 behavior:
+
+- POST/GET `/agents/{agent_id}/messages` expose successful message pairs, opaque IDs, UTC timestamps, sequence ordering, bounded cursor pagination and redacted errors.
+- `AgentChatService` uses only project-owned interaction/repository ports; it reserves BUSY before awaiting and rejects overlap. Other Agents remain independent.
+- Caller cancellation leaves the owned turn running with BUSY retained; shutdown drains pending turns before closing adapters.
+- Recoverable failures preserve runtime and committed history. Native rollback restores the same UUID; a pending marker or indeterminate outcome requires explicit recovery and cannot be bypassed via stop/start.
+- `DockerAgentQwenRunner` executes inside the existing lifecycle-owned non-root container and workspace volume. No additional Agent runtime is created by HTTP turns.
+- The real Docker/Ollama HTTP test recalls a random codeword after stop/start, verifies native artifacts inside the same container, isolates another Agent's history, and deletes owned resources.
+
+Verified TASK-011 behavior:
+
+- `POST /agents/{agent_id}/messages/stream` delivers typed, versioned SSE events for one accepted turn: started, then committed content/completed or a redacted terminal error.
+- Actual Qwen JSONL event types/timing were observed before selecting SSE. The existing adapter buffers its turn result; partial-message mode and token delivery are not claimed.
+- JSON and SSE share `AgentChatService.begin`, the same logical Session, BUSY admission, completion, history limits, redaction and failure policy. The public turn ID is allocated at admission and retained in history.
+- Keep-alive comments are generated on demand, each network send has a configured timeout, and no event queue or replay cache is introduced.
+- ASGI disconnect, network failure and slow-consumer timeout detach delivery without cancelling inference or releasing BUSY. Other Agents continue independently.
+- There is no global/Agent-wide subscription or attach-by-ID API. Foreign turn/session request fields are rejected. Last-Event-ID is rejected before admission; clients inspect history after losing a response.
+- The real TCP/Uvicorn/Docker/Ollama test received started while a second HTTP request still observed BUSY and empty history, then keep-alive and committed content. A JSON follow-up recalled the SSE turn's random codeword.
 
 ## Текущая архитектура
 
 `application/ports/agent_runtime.py` остаётся владельцем runtime-neutral контракта. `adapters/docker_runtime.py` зависит от этого порта и инкапсулирует Docker SDK, resource names, labels, status mapping и cleanup. Domain/application не импортируют Docker.
 
-`DockerRuntime` не реализует conversation/session transport и не содержит Qwen-specific behavior. Каталог `DockerWorkload` является composition/deployment input, а не ветвлением use cases. Точный destination allowlist намеренно не эмулируется небезопасным unrestricted network access.
+`DockerRuntime` не реализует conversation/session transport и не содержит Qwen-specific behavior. Каталог `DockerWorkload` является composition/deployment input, а не ветвлением use cases. Default workload остаётся без сети; TASK-007 добавляет явный local bridge profile, требующий точного совпадения declared destinations. Он подтверждает local image-to-Ollama connectivity, но намеренно не выдаётся за destination egress enforcement.
 
 `mock_task_service` остаётся отдельным service-plane пакетом и не входит в dependency graph Universal Agent Runtime.
 
-`qwen_ollama_probe` является standalone verification package. Он запускает официальный Qwen Code image и не реализует conversation use case, Session persistence или wiring в `DockerRuntime`; эти границы остаются за TASK-006, TASK-007 и TASK-010.
+`application/ports/agent_interaction.py` владеет отдельным runtime-neutral conversation contract. `adapters/qwen_session.py` инкапсулирует Qwen CLI, native chat layout, Docker command и persistent adapter artifacts; domain/application видят только общие `AgentId`, `SessionId` и interaction values/failures. `qwen_ollama_probe` остаётся standalone verification package.
+
+`QwenSessionAdapter` остаётся отдельным от lifecycle-операций `DockerRuntime`: TASK-009 координирует их только через независимые ports, создаёт Session после runtime provisioning и удаляет её после runtime cleanup. TASK-010 now rejects concurrent turns and protects BUSY through caller cancellation.
+
+`configuration.py` и `composition.py` выбирают deployment adapter до создания FastAPI app. `http_api.py` зависит только от `ApplicationComposition`, transport schemas и FastAPI, не от Docker/Qwen SDK. FastAPI app хранит composition только в собственном lifespan state; health/readiness относятся к foundation приложения, а не к lifecycle конкретного Agent.
+
+`application/agent_lifecycle.py` координирует Agent state через runtime/session/repository ports. `adapters/in_memory_agent_repository.py` предоставляет explicit process-local metadata state. `http_api.py` преобразует только safe application records/failures в transport schemas; runtime selection и Docker/Qwen calls отсутствуют в handlers.
+
+`application/agent_chat.py` coordinates process-local public history and state. `domain/message.py` contains neutral message values. `adapters/docker_agent_qwen.py` encapsulates ownership-label discovery, Qwen execution and bounded native-state transfer into the existing Agent runtime. API history is separate from the persistent adapter context. [Chat contract](docs/agent-chat-api.md) and ADR-0006 define the relationship.
+
+`http_streaming.py` owns transport-only SSE schemas, framing and bounded sends.
+`AgentChatService.begin` is shared admission for JSON and SSE. Lifecycle and
+interaction ports, Qwen adapters and runtime drivers are unchanged by TASK-011.
+[Streaming contract](docs/agent-streaming-api.md) and ADR-0007 explicitly distinguish
+SSE event delivery from incremental token delivery.
 
 ## Предположения об окружении
 
@@ -59,30 +133,51 @@
 - Purpose-built test image собирается из `tests/docker_assets/Dockerfile` на закреплённом digest BusyBox; это не будущий Qwen image.
 - Qwen Code `0.23.1` проверен в официальном image digest `sha256:996a12729e25f694254768ac8d3b5f870c54e6ac5825e169299e85a19c78cc10`.
 - Внешний локальный Ollama `0.24.0` и модель `qwen3:0.6b` с local list ID `7df6b6e09427` были доступны для живых проверок.
-- Default Docker bridge разрешал `host.docker.internal` до host Ollama. Тот же путь из окончательной managed network TASK-007 остаётся `NOT VERIFIED`.
+- Для воспроизводимой live session-проверки TASK-006 использована `qwen3:1.7b` (1.4 GB), local list ID `8f68893c685c`, weights blob `sha256:3d0b790534fe4b79525fc3692950408dca41171676ed7e21db57af5c65ef6ab6`.
+- Default Docker bridge разрешил `host.docker.internal` до host Ollama из universal agent image, запущенного `DockerRuntime`; это проверенный local integration path, но не destination egress enforcement.
 - Корпоративные Qwen/Ollama endpoints, authentication, TLS/proxy/certificate trust и сервисы остаются `NOT VERIFIED`.
+
+- TASK-010 live HTTP integration used the pinned universal image and configured local `qwen3:1.7b`; the second request recalled the first request's random codeword.
+
+- TASK-011 used Uvicorn/HTTPX over a real ephemeral loopback TCP socket, the pinned Agent image, and local external `qwen3:1.7b`. Early SSE event delivery and SSE-to-JSON context reuse passed.
 
 ## Известные ограничения
 
 - Автоматическое восстановление in-memory records/tombstones новым процессом не реализовано. Docker resources имеют полные ownership labels и обнаружимы; durable metadata store относится к последующей persistence-задаче и остаётся `NOT VERIFIED`.
-- Непустой destination allowlist отклоняется. Без отдельного enforcement component Docker bridge не считается достаточной изоляцией egress.
+- `DockerWorkload` может объявить bridge profile для exact local integration destinations, но Docker bridge не фильтрует фактический egress. Production network enforcement остаётся `NOT VERIFIED` до отдельной policy/Kata-задачи.
 - Docker health status является только backend readiness signal; Qwen interaction readiness относится к последующим задачам.
 - Mock Task store остаётся single-process и in-memory; corporate schema/auth/persistence не реализованы.
 - `qwen3:0.6b` успешно выполняет bounded prompt и выдаёт `read_file` tool call, но неточно следует требованию к финальному тексту после tool result.
-- Native Qwen Code `--resume` и chat artifact были наблюдаемы, но 0.6B-модель не воспроизвела случайный token. Persistent conversational correctness, artifact ownership и cleanup остаются `NOT VERIFIED` до TASK-006.
+- Native-only Qwen Code `--resume` на 0.6B-модели был семантически нестабилен. TASK-006 решает это комбинацией native artifact и project-owned history; live проверка на 1.7B прошла.
+- Автоматическое восстановление Agent/Session после будущего перезапуска Orchestrator не реализовано; adapter artifacts и ожидаемые recovery checks задокументированы.
+- Conversation and public history have explicit configured bounds. TASK-010 rejects excess history without truncation and rejects concurrent turns. Compression/summarization are not implemented.
 - `qwen3:4b-thinking` на CPU достиг 360-second wall-time budget с exit status 55; поэтому воспроизводимый default probe использует 0.6B.
-- Connectivity из final `DockerRuntime` network policy остаётся `NOT VERIFIED` до TASK-007; текущий probe использует default Docker bridge.
+- Durable Orchestrator metadata и восстановление Agent records/tombstones после restart не реализованы; process-local `InMemoryAgentRepository` теряет их при остановке приложения. Это остаётся `NOT VERIFIED` для последующей persistence/recovery работы.
+- Shutdown приложения не выполняет автоматический delete существующих Agents; оператор обязан остановить/удалить их через API. Crash recovery runtime resources остаётся `NOT VERIFIED` без durable metadata.
+- TASK-010 implements message/history endpoints and BUSY transitions; TASK-011 adds turn-bound SSE. Response content is buffered until commit: this is not token streaming.
 - Реальные Kata и корпоративные Qwen/Ollama integrations остаются `NOT VERIFIED`.
-- В `TASKS.md` сохранены существовавшие пользовательские изменения форматирования и рекомендаций моделей; в TASK-005 изменён только его статус.
+- Pre-existing working-tree changes from earlier tasks and user model recommendations were preserved; only TASK-011 was advanced to DONE during this task.
+
+- Public message IDs/timestamps and recovery flags are process-local. Automatic restart recovery is NOT VERIFIED because no durable Agent repository is implemented.
+- POST messages has no idempotency key. After a lost HTTP response, inspect history before resubmission; accepted turns continue after caller cancellation.
+- Tools remain disabled. Rollback of future external Tool writes is NOT VERIFIED and not claimed.
+- Known injected credential values are redacted from message content; arbitrary user-supplied secrets are not automatically detected.
+
+- Incremental token/partial-message delivery is NOT VERIFIED and not implemented; the SSE content event contains one full committed response.
+- SSE replay and automatic reconnection are not supported. On disconnect the accepted turn continues; a terminal frame may be lost. Durable event replay and remote proxy buffering remain NOT VERIFIED.
+- Streaming uses the same local API access assumptions as JSON chat. No authentication or tenant authorization infrastructure was added.
 
 ## Решения
 
-Сохраняются ADR-0001 — ADR-0004. Для TASK-005 новый ADR не создан: executable probe подтверждает уже принятое ADR-0003 разделение Qwen Code и внешнего Ollama, не изменяя архитектуру.
+ADR-0001 through ADR-0005 remain in force. ADR-0006 defines public chat commit and recovery ownership. ADR-0007 selects turn-bound SSE with committed response content. ADR-0005 фиксирует комбинацию native Qwen session artifact и project-owned validated history как durable persistence mechanism TASK-006.
 
 - [ADR-0001](docs/decisions/0001-runtime-port-and-driver-boundary.md)
 - [ADR-0002](docs/decisions/0002-per-agent-isolation-boundary.md)
 - [ADR-0003](docs/decisions/0003-external-inference-boundary.md)
 - [ADR-0004](docs/decisions/0004-runtime-retry-and-recovery-ownership.md)
+- [ADR-0005](docs/decisions/0005-qwen-session-persistence.md)
+- [ADR-0006](docs/decisions/0006-public-chat-commit-and-recovery.md)
+- [ADR-0007](docs/decisions/0007-turn-bound-committed-sse.md)
 
 ## Важные команды
 
@@ -104,6 +199,36 @@ ollama pull qwen3:0.6b
 .\.venv\Scripts\python.exe -m qwen_ollama_probe tool
 .\.venv\Scripts\python.exe -m qwen_ollama_probe session
 
+# Unit и opt-in live persistence tests TASK-006
+.\.venv\Scripts\python.exe -m pytest tests/unit/test_qwen_session.py -q
+$env:RUN_QWEN_OLLAMA_INTEGRATION='1'
+$env:QWEN_OLLAMA_MODEL='qwen3:1.7b'
+.\.venv\Scripts\python.exe -m pytest tests/integration/test_qwen_session.py -q
+
+# Universal agent image: build и opt-in live Qwen turn/resume через DockerRuntime
+docker build --pull=false --tag uar-task007-agent:local agent_image
+.\.venv\Scripts\python.exe -m pytest tests/integration/test_agent_image.py -q
+
+# HTTP foundation, TestClient и generated OpenAPI без external services
+.\.venv\Scripts\python.exe -m pytest tests/api/test_orchestrator_foundation.py -q
+
+# Agent lifecycle unit/API tests без external services
+.\.venv\Scripts\python.exe -m pytest tests/unit/test_agent_lifecycle.py tests/api/test_agent_lifecycle_api.py -q
+
+# Public lifecycle API с реальным DockerRuntime и universal agent image
+.\.venv\Scripts\python.exe -m pytest tests/integration/test_agent_lifecycle_api.py -q
+
+# TASK-010 deterministic chat/transport tests and live HTTP continuity
+.\.venv\Scripts\python.exe -m pytest tests/unit/test_agent_chat.py tests/unit/test_docker_agent_qwen.py tests/unit/test_qwen_session.py tests/api/test_agent_chat_api.py -q
+$env:RUN_QWEN_OLLAMA_INTEGRATION='1'
+$env:QWEN_OLLAMA_MODEL='qwen3:1.7b'
+.\.venv\Scripts\python.exe -m pytest tests/integration/test_agent_chat_api.py -q
+
+# TASK-011 deterministic SSE and live TCP/Docker/Ollama validation
+.\.venv\Scripts\python.exe -m pytest tests/api/test_agent_streaming.py tests/unit/test_agent_chat.py tests/api/test_agent_chat_api.py -q
+$env:RUN_QWEN_OLLAMA_INTEGRATION='1'
+.\.venv\Scripts\python.exe -m pytest tests/integration/test_agent_streaming.py -q
+
 # Полный quality gate
 .\.venv\Scripts\python.exe -m pytest
 .\.venv\Scripts\python.exe -m ruff format --check .
@@ -120,27 +245,76 @@ git diff --check -- .
 
 ## Последняя валидация
 
-Дата: 2026-09-09. Результат: PASS для TASK-005.
+Date: 2026-09-09. Result: PASS for TASK-011.
 
-- Qwen/Ollama unit tests: 20 passed; configuration, failure categories и `stream-json` parsing проверены.
-- Live prompt probe: PASS; in-container preflight HTTP 200, точный `QWEN_OLLAMA_PROBE_OK`, Qwen session ID получен.
-- Live controlled tool probe: PASS; только `read_file` наблюдался, Qwen final result event завершился успешно.
-- Session/resume evidence: OBSERVED, NOT VERIFIED for persistence; тот же Qwen session ID использован, но случайный token моделью 0.6B не восстановлен.
-- Container network probe: PASS для default Docker bridge через `host.docker.internal`; final managed-network assumption остаётся `NOT VERIFIED` для TASK-007.
-- Full pytest suite: 207 passed.
-- Ruff format check: PASS, 54 files already formatted.
-- Ruff lint: PASS.
-- mypy `src tests`: PASS, 40 source files.
-- `git diff --check`: PASS; только предупреждения Git о platform line-ending conversion.
-- Dependency boundary: PASS; standalone probe не добавил Qwen/Ollama types в domain/application.
-- Все восемь acceptance criteria TASK-005 проверены; непроверенные future-runtime/corporate assumptions явно отмечены.
+- Initial focused SSE/chat/lifecycle checks: 42 passed; the additional ASGI
+  disconnect test subsequently passed in the full suite.
+- Full pytest: 315 passed, 4 opt-in live tests skipped in that run.
+- Separately enabled live TCP SSE test: 1 passed in 24.57 s. It verifies early
+  started delivery while BUSY, keep-alive, one committed content frame,
+  terminal completion, public history IDs, and context reuse by JSON chat.
+- Separately observed current Qwen output through the existing TASK-010 live
+  test: 1 passed in 35.64 s. Safe event-type timings are recorded in the streaming
+  contract; no raw prompts/output/credentials were retained in the evidence log.
+- Ruff format --check: PASS, 91 files already formatted. Ruff lint: PASS.
+- mypy src tests: PASS, 68 source files.
+- Managed Docker container and volume inventories: empty after validation.
+- Scoped diff compared against a pre-task workspace snapshot: only TASK-011
+  code/tests/docs/configuration changed. Existing unrelated changes preserved.
+- git diff --check: PASS. No new dependencies, tool operations, or infrastructure.
+- Existing Starlette/HTTPX/AnyIO deprecation warnings remain; no test failures.
+- All eight acceptance criteria verified with the explicit buffered-content
+  limitation. Evidence mapping: [agent-streaming-api.md](docs/agent-streaming-api.md).
+
+## TASK-011 changed files
+
+- `src/universal_agent_runtime/application/agent_chat.py`
+- `src/universal_agent_runtime/http_streaming.py`
+- `src/universal_agent_runtime/http_api.py`
+- `src/universal_agent_runtime/configuration.py`
+- `tests/api/test_agent_streaming.py`
+- `tests/api/test_agent_lifecycle_api.py`
+- `tests/integration/test_agent_streaming.py`
+- `.env.example`, `AGENTS.md`, `TASKS.md`, `PROJECT_STATE.md`
+- `docs/agent-streaming-api.md`, `docs/decisions/0007-turn-bound-committed-sse.md`
+- `docs/architecture.md`, `docs/agent-chat-api.md`, `docs/agent-lifecycle-api.md`,
+  `docs/orchestrator-api-foundation.md`
+
+## TASK-010 changed files
+
+The following list describes this task, excluding pre-existing working-tree
+changes that were preserved without modification:
+
+- `.env.example`, `AGENTS.md`, `PROJECT_STATE.md`, `TASKS.md`
+- `docs/architecture.md`, `docs/agent-chat-api.md`, `docs/agent-lifecycle-api.md`,
+  `docs/orchestrator-api-foundation.md`, `docs/qwen-session.md`
+- `docs/decisions/0005-qwen-session-persistence.md`,
+  `docs/decisions/0006-public-chat-commit-and-recovery.md`
+- `src/universal_agent_runtime/application/agent_chat.py`,
+  `src/universal_agent_runtime/application/agent_lifecycle.py`
+- `src/universal_agent_runtime/application/ports/agent_interaction.py`,
+  `src/universal_agent_runtime/application/ports/interaction_errors.py`,
+  `src/universal_agent_runtime/application/ports/interaction_values.py`
+- `src/universal_agent_runtime/domain/agent.py`,
+  `src/universal_agent_runtime/domain/message.py`
+- `src/universal_agent_runtime/adapters/docker_agent_qwen.py`,
+  `src/universal_agent_runtime/adapters/qwen_session.py`
+- `src/universal_agent_runtime/composition.py`,
+  `src/universal_agent_runtime/configuration.py`,
+  `src/universal_agent_runtime/http_api.py`
+- `tests/unit/test_agent_chat.py`, `tests/unit/test_docker_agent_qwen.py`,
+  `tests/unit/test_qwen_session.py`, `tests/unit/test_dependency_direction.py`
+- `tests/api/test_agent_chat_api.py`, `tests/api/test_agent_lifecycle_api.py`,
+  `tests/api/test_orchestrator_foundation.py`
+- `tests/integration/test_agent_chat_api.py`,
+  `tests/runtime_support/fake_interaction.py`
 
 ## Рекомендуемая следующая задача
 
-TASK-006 — Постоянная сессия агента Qwen.
+TASK-012 — Restricted Task REST Tool.
 
-TASK-006 остаётся `TODO`; не запускать без явной команды пользователя.
+TASK-012 remains TODO. Do not start without an explicit user instruction.
 
-Рекомендуемая модель: GPT-5.6 Sol.
+Recommended model: GPT-5.6 Terra.
 
-Рекомендуемый режим рассуждения: High.
+Recommended reasoning level: High.

@@ -56,8 +56,8 @@ It contains neither the Ollama endpoint nor credentials.
 
 `history.jsonl` schema version 1 contains only committed successful turns, in
 strict consecutive order. Files are replaced atomically. Prompts and model
-responses are persisted in full, so callers must treat the storage root as
-Agent data and must never put credentials into conversation text.
+responses are persisted as Agent data, with configured injected credentials
+redacted from message text. Arbitrary user secrets are not automatically detected.
 
 The Qwen credential is injected into each ephemeral process through
 environment variables and is never written to the manifest, history, settings,
@@ -96,8 +96,8 @@ construct this adapter against the same retained storage root, and call
 `create_session` to validate/reopen it. Orchestrator metadata persistence and
 wiring are not implemented in TASK-006.
 
-Turns for one Session must be serialized by the Orchestrator. Cross-request
-queueing/rejection belongs to TASK-010; this adapter does not introduce a
+Turns for one Session must be serialized by the Orchestrator. TASK-010 now owns cross-request
+rejection and protects an accepted turn through HTTP cancellation; this adapter does not introduce a
 process-global mutable Session registry.
 
 ## Isolation and cleanup
@@ -112,8 +112,10 @@ Unit tests prove that two Agents receive different native UUIDs, Qwen homes,
 and workspaces; an Agent cannot address another logical Session through the
 port. `delete_session` validates ownership, recursively removes that exact
 Agent directory, verifies absence, and is idempotent after successful removal.
-Connecting this cleanup to Agent delete, and proving stop/start retention
-through `DockerRuntime`, remain deferred to TASK-009 and TASK-014.
+TASK-009 connects this cleanup to Agent delete through the separate interaction
+port and verifies stop/start retention through lifecycle fakes. TASK-007 proves
+native workspace retention through `DockerRuntime`; TASK-010 now verifies public
+message continuity. The full business E2E scenario remains TASK-014.
 
 ## Stable failures
 
@@ -123,8 +125,9 @@ stable code, and retryability:
 * `not_found`: required manifest, history, or native transcript is absent;
 * `conflict`: an Agent directory already belongs to another Session;
 * `corrupt_state`: JSON, history sequence, or transcript records are invalid;
-* `incompatible_state`: schema, pinned Qwen image/version, model, size, or
-  configured history compatibility check fails;
+* `incompatible_state`: schema, pinned Qwen image/version, model, or native
+  transcript size compatibility check fails;
+* `validation_failed`: the configured context limit rejects a turn before execution;
 * `inference_unavailable`: provider connection/authentication/model evidence;
 * `timeout`: Qwen Code exits on its bounded wall-time;
 * `protocol_failure`: Qwen JSONL has no valid successful result, returns a
@@ -157,6 +160,25 @@ turn one stored a random codeword,
 the first adapter and Qwen process were closed, and a newly constructed adapter
 resumed the same native Session and returned the exact codeword on turn two.
 
-The exact managed `DockerRuntime` stop/start lifecycle and future universal
-agent image are **NOT VERIFIED** here because they belong to TASK-007,
-TASK-009, and TASK-014.
+TASK-007 independently verified that the universal agent image preserves native
+Qwen session state in its named workspace volume across `DockerRuntime`
+stop/start. TASK-009 now initializes one logical Session during Agent create,
+preserves it during stop/start, and calls `delete_session` only after runtime
+cleanup during Agent delete. TASK-010 now provides public message turns and verified HTTP conversation
+continuity; the complete business scenario remains TASK-014.
+
+## TASK-010 composed HTTP execution and failure safety
+
+The standalone TASK-006 `DockerQwenCommandRunner` above remains a verification
+path. HTTP composition now supplies `DockerAgentQwenRunner`, which executes
+Qwen inside the already-created Agent container and mirrors native state into
+its managed workspace volume. No extra runtime or host workspace bind mount is
+created for an HTTP turn. Details and limits are in [agent-chat-api.md](agent-chat-api.md).
+
+Before executing, the adapter snapshots native state and writes a pending
+marker. Known failures restore native state, history and manifest before being
+reported as recoverable. A remaining pending marker rejects reopen/turn as
+`corrupt_state`; it is never treated as an empty Session. Application-owned
+turn tasks protect the adapter thread from premature caller cancellation.
+Public IDs/timestamps remain separate process-local Agent metadata, as specified
+in [ADR-0006](decisions/0006-public-chat-commit-and-recovery.md).

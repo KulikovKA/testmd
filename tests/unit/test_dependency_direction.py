@@ -11,7 +11,18 @@ from universal_agent_runtime.application.ports.agent_runtime import AgentRuntime
 
 def test_domain_and_application_import_only_inward_or_stdlib() -> None:
     package = Path(__file__).resolve().parents[2] / "src" / "universal_agent_runtime"
-    allowed = {"re", "dataclasses", "enum", "uuid", "math", "ipaddress", "typing"}
+    allowed = {
+        "asyncio",
+        "collections",
+        "re",
+        "dataclasses",
+        "datetime",
+        "enum",
+        "uuid",
+        "math",
+        "ipaddress",
+        "typing",
+    }
     for boundary in ("domain", "application"):
         for path in (package / boundary).rglob("*.py"):
             for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
@@ -42,7 +53,5 @@ def test_lifecycle_port_does_not_grow_a_conversation_transport() -> None:
 
 
 def test_conversation_port_stays_separate_from_lifecycle_control() -> None:
-    public = {
-        name for name in AgentInteraction.__dict__ if not name.startswith("_")
-    }
+    public = {name for name in AgentInteraction.__dict__ if not name.startswith("_")}
     assert public == {"create_session", "turn", "delete_session"}

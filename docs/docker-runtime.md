@@ -18,11 +18,17 @@ Deployment передаёт адаптеру каталог `DockerWorkload`, и
 | `ResourceLimits.memory_bytes` | hard memory limit |
 | `EnvironmentVariable` | Container environment |
 | `SecretBinding` | Значение от injected runtime resolver; secret reference и значение не выводятся в errors |
-| Пустой `network` | `network_mode=none` и `network_disabled=true` |
-| Непустой `network` | `CONFIGURATION_REJECTED`, потому что локальный Docker сам по себе не обеспечивает точный destination allowlist |
+| Пустой `network` для workload с `network_mode=none` | `network_mode=none` и `network_disabled=true` |
+| Явно объявленный local-integration network profile | `DockerWorkload.network_mode="bridge"` и точное совпадение `CreateRuntimeRequest.network` с deployment-owned `network_destinations` |
 | Readiness | `CONFIRMED` только для running container с Docker health status `healthy` |
 
 Agent container создаётся с read-only root filesystem, `CapDrop=ALL`, `no-new-privileges`, PID limit, явным non-root user из `DockerWorkload`, без privileged mode, host bind mounts и Docker socket. Writable workspace предоставляется только named volume; `/tmp` — ограниченный `tmpfs`.
+
+`bridge` profile введён TASK-007 только для воспроизводимой проверки доступа
+agent image к явно настроенному local Ollama. Docker bridge не фильтрует
+destination egress, поэтому это не security enforcement и не доказательство
+production network isolation. Непустой network tuple без идентичного
+deployment-owned profile по-прежнему отклоняется с `CONFIGURATION_REJECTED`.
 
 ## Lifecycle и восстановление
 
@@ -37,3 +43,8 @@ Labels позволяют оператору обнаружить ресурсы
 `tests/contract/test_agent_runtime.py` выполняется без изменения assertions для `FakeRuntime` и реального `DockerRuntime`. Docker harness собирает отдельный безвредный image из `tests/docker_assets/Dockerfile`; это не будущий Qwen image.
 
 `tests/integration/test_docker_runtime.py` отдельно проверяет create/start/status/stop/delete, полную очистку, environment/secret resolution, labels, named-volume workspace, CPU/RAM/PID limits и настройки изоляции. Если локальный Docker daemon недоступен, Docker cases пропускаются, но TASK-004 нельзя считать завершённой только на основании такого запуска.
+
+`tests/integration/test_agent_image.py` — opt-in live test TASK-007. Он собирает
+`agent_image/`, запускает его через `DockerRuntime` с explicit local bridge
+profile, выполняет Qwen turn, проверяет native session после stop/start и
+удаляет все принадлежащие runtime ресурсы.

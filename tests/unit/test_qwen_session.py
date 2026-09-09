@@ -117,6 +117,85 @@ def test_filesystem_root_cannot_be_session_storage(tmp_path: Path) -> None:
         config(Path(tmp_path.anchor))
 
 
+@pytest.mark.parametrize("successful_first", [False, True])
+def test_failed_native_turn_rolls_back_before_retry(
+    tmp_path: Path, successful_first: bool
+) -> None:
+    class MutatingFailure(FakeQwenRunner):
+        fail = False
+
+        def run(self, invocation: QwenInvocation) -> QwenExecution:
+            result = super().run(invocation)
+            if self.fail:
+                raise QwenRunnerFailure(QwenRunnerErrorCode.INFERENCE_UNAVAILABLE)
+            return result
+
+    runner = MutatingFailure()
+    adapter = QwenSessionAdapter(config(tmp_path / "sessions"), runner=runner)
+    reference = session()
+    run(adapter.create_session(reference))
+    if successful_first:
+        run(adapter.turn(TurnRequest(reference, "committed")))
+    directory = tmp_path / "sessions" / reference.agent_id.value
+    before = {
+        p.relative_to(directory): p.read_bytes()
+        for p in directory.rglob("*")
+        if p.is_file()
+    }
+    runner.fail = True
+    with pytest.raises(InteractionFailure) as failure:
+        run(adapter.turn(TurnRequest(reference, "failed")))
+    assert failure.value.code is InteractionErrorCode.INFERENCE_UNAVAILABLE
+    after = {
+        p.relative_to(directory): p.read_bytes()
+        for p in directory.rglob("*")
+        if p.is_file()
+    }
+    assert after == before
+    runner.fail = False
+    result = run(adapter.turn(TurnRequest(reference, "retry")))
+    assert result.completed_turns == (2 if successful_first else 1)
+    assert len({i.native_session_id for i in runner.invocations}) == 1
+    assert "failed" not in runner.invocations[-1].prompt
+
+
+def test_interrupted_commit_never_reopens_or_replaces_session(tmp_path: Path) -> None:
+    runner = FakeQwenRunner()
+    adapter = QwenSessionAdapter(config(tmp_path / "sessions"), runner=runner)
+    reference = session()
+    run(adapter.create_session(reference))
+    directory = tmp_path / "sessions" / reference.agent_id.value
+    (directory / ".turn-in-progress").write_text("pending\n")
+    for operation in (
+        adapter.create_session(reference),
+        adapter.turn(TurnRequest(reference, "retry")),
+    ):
+        with pytest.raises(InteractionFailure) as failure:
+            run(operation)
+        assert failure.value.code is InteractionErrorCode.CORRUPT_STATE
+    assert runner.invocations == []
+    run(adapter.delete_session(reference))
+    assert not directory.exists()
+
+
+def test_injected_credential_is_redacted_in_conversation_artifacts(
+    tmp_path: Path,
+) -> None:
+    runner = FakeQwenRunner(["synthetic-private-credential"])
+    adapter = QwenSessionAdapter(
+        config(tmp_path / "sessions", api_key="synthetic-private-credential"),
+        runner=runner,
+    )
+    reference = session()
+    run(adapter.create_session(reference))
+    response = run(adapter.turn(TurnRequest(reference, "synthetic-private-credential")))
+    assert response.response == "[REDACTED]"
+    assert "synthetic-private-credential" not in runner.invocations[0].prompt
+    for path in (tmp_path / "sessions").rglob("*"):
+        if path.is_file():
+            assert "synthetic-private-credential" not in path.read_text()
+
+
 def test_multiple_turns_and_reopened_adapter_use_one_logical_session(
     tmp_path: Path,
 ) -> None:
@@ -299,7 +378,7 @@ def test_history_limit_is_rejected_without_silent_truncation(tmp_path: Path) -> 
 
     with pytest.raises(InteractionFailure) as captured:
         run(adapter.turn(TurnRequest(reference, "hello")))
-    assert captured.value.code is InteractionErrorCode.INCOMPATIBLE_STATE
+    assert captured.value.code is InteractionErrorCode.VALIDATION_FAILED
     assert runner.invocations == []
     run(adapter.close())
 

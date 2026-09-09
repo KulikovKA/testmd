@@ -103,14 +103,14 @@ class QwenInvocation:
     qwen_home: Path
     workspace: Path
     native_session_id: UUID
-    prompt: str
+    prompt: str = field(repr=False)
     resume: bool
 
 
 @dataclass(frozen=True)
 class QwenExecution:
     native_session_id: UUID
-    response: str
+    response: str = field(repr=False)
 
 
 class QwenRunnerErrorCode(str, Enum):
@@ -143,7 +143,7 @@ class DockerQwenCommandRunner:
             else docker.from_env(timeout=config.wall_time_seconds + 30)
         )
 
-    def run(self, invocation: QwenInvocation) -> QwenExecution:
+    def command(self, invocation: QwenInvocation) -> list[str]:
         command = [
             "qwen",
             "--bare",
@@ -172,7 +172,10 @@ class DockerQwenCommandRunner:
         else:
             command.extend(("--session-id", str(invocation.native_session_id)))
         command.extend(("-p", f"/think {invocation.prompt}"))
+        return command
 
+    def run(self, invocation: QwenInvocation) -> QwenExecution:
+        command = self.command(invocation)
         container = None
         try:
             container = self._client.containers.run(
@@ -539,6 +542,8 @@ class QwenSessionAdapter:
     def _create_sync(self, reference: SessionReference) -> SessionObservation:
         agent_directory = self._agent_directory(reference)
         if agent_directory.exists():
+            if (agent_directory / ".turn-in-progress").exists():
+                raise self._failure(Op.CREATE, reference, Code.CORRUPT_STATE)
             state = self._load_state(reference, Op.CREATE, mismatch_code=Code.CONFLICT)
             history = self._read_history(state, Op.CREATE)
             self._transcript(state, Op.CREATE)
@@ -562,7 +567,7 @@ class QwenSessionAdapter:
     async def create_session(self, reference: SessionReference) -> SessionObservation:
         return await asyncio.to_thread(self._create_sync, reference)
 
-    def _turn_sync(self, request: TurnRequest) -> TurnResult:
+    def _execute_turn_sync(self, request: TurnRequest) -> TurnResult:
         state = self._load_state(request.session, Op.TURN)
         history = self._read_history(state, Op.TURN)
         transcript = self._transcript(state, Op.TURN)
@@ -570,7 +575,7 @@ class QwenSessionAdapter:
             prompt = self._build_prompt(history, request.message)
         except ValueError:
             raise self._failure(
-                Op.TURN, request.session, Code.INCOMPATIBLE_STATE
+                Op.TURN, request.session, Code.VALIDATION_FAILED
             ) from None
         try:
             self._write_settings(request.session)
@@ -592,6 +597,10 @@ class QwenSessionAdapter:
             raise self._translate_runner_failure(request.session, error) from None
         if execution.native_session_id != state.native_session_id:
             raise self._failure(Op.TURN, request.session, Code.PROTOCOL_FAILURE)
+        execution = replace(
+            execution,
+            response=execution.response.replace(self._config.api_key, "[REDACTED]"),
+        )
         if transcript is None:
             transcript = self._discover_transcript(state)
         relative_transcript = transcript.relative_to(
@@ -625,6 +634,50 @@ class QwenSessionAdapter:
             next_turn.number,
             execution.response,
         )
+
+    def _turn_sync(self, request: TurnRequest) -> TurnResult:
+        directory = self._agent_directory(request.session)
+        marker = directory / ".turn-in-progress"
+        if marker.exists():
+            raise self._failure(Op.TURN, request.session, Code.CORRUPT_STATE)
+        # Validate before touching state, and retain the same UUID on retries.
+        state = self._load_state(request.session, Op.TURN)
+        self._read_history(state, Op.TURN)
+        self._transcript(state, Op.TURN)
+        backup = directory / ".turn-backup"
+        try:
+            shutil.copytree(self._qwen_home(request.session), backup)
+            history = self._history_path(request.session).read_bytes()
+            manifest = self._manifest_path(request.session).read_bytes()
+            marker.write_text("pending\n", encoding="utf-8")
+            try:
+                result = self._execute_turn_sync(
+                    TurnRequest(
+                        request.session,
+                        request.message.replace(self._config.api_key, "[REDACTED]"),
+                    )
+                )
+            except InteractionFailure:
+                # The runner has exited: restore the last committed native and
+                # project state before advertising a recoverable failure.
+                shutil.rmtree(self._qwen_home(request.session))
+                shutil.copytree(backup, self._qwen_home(request.session))
+                self._history_path(request.session).write_bytes(history)
+                self._manifest_path(request.session).write_bytes(manifest)
+                shutil.rmtree(backup)
+                marker.unlink()
+                raise
+            # Remove known injected credentials from persisted native messages.
+            for transcript in self._qwen_home(request.session).rglob("*.jsonl"):
+                text = transcript.read_text(encoding="utf-8")
+                escaped = json.dumps(self._config.api_key)[1:-1]
+                self._atomic_write(transcript, text.replace(escaped, "[REDACTED]"))
+            shutil.rmtree(backup)
+            marker.unlink()
+            return result
+        except OSError:
+            # Retain the marker/evidence if commit or rollback is uncertain.
+            raise self._failure(Op.TURN, request.session, Code.CORRUPT_STATE) from None
 
     async def turn(self, request: TurnRequest) -> TurnResult:
         return await asyncio.to_thread(self._turn_sync, request)

@@ -1,6 +1,6 @@
 """Runtime-neutral values for one logical Agent conversation."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from universal_agent_runtime.domain.identifiers import AgentId, SessionId
 
@@ -22,7 +22,7 @@ class SessionReference:
 @dataclass(frozen=True)
 class TurnRequest:
     session: SessionReference
-    message: str
+    message: str = field(repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.session, SessionReference):
@@ -52,7 +52,7 @@ class SessionObservation:
 class TurnResult:
     session: SessionReference
     completed_turns: int
-    response: str
+    response: str = field(repr=False)
 
     def __post_init__(self) -> None:
         SessionObservation(self.session, self.completed_turns)

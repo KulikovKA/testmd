@@ -118,23 +118,35 @@
 
 |-- pyproject.toml
 
+|-- agent_image/              # закреплённый Qwen Code image и non-root launcher TASK-007
+
 |-- src/
 
 |   |-- qwen_ollama_probe/     # bounded standalone Qwen Code/Ollama verification
 
 |   `-- universal_agent_runtime/
 
+|       |-- configuration.py   # валидированная deployment configuration для API composition
+
+|       |-- http_api.py        # lifecycle, JSON chat and committed-content SSE HTTP API
+
 |       |-- application/
 
-|       |   `-- ports/          # AgentRuntime, AgentInteraction, neutral values/errors
+|       |   |-- agent_lifecycle.py # Agent lifecycle use cases and state coordination
+
+|       |   `-- ports/          # AgentRuntime, AgentInteraction, AgentRepository
 
 |       |-- domain/
+
+|       |   |-- agent.py        # Orchestrator-owned Agent lifecycle states
 
 |       |   `-- identifiers.py  # AgentId, WorkspaceId, SessionId
 
 |       |-- adapters/
 
 |       |   |-- docker_runtime.py # локальный Docker driver для AgentRuntime
+
+|       |   |-- in_memory_agent_repository.py # explicit process-local metadata
 
 |       |   `-- qwen_session.py   # persistent Qwen adapter for AgentInteraction
 
@@ -145,6 +157,8 @@
 |       `-- composition.py
 
 |-- tests/
+
+|   |-- api/                   # mock service и Orchestrator HTTP foundation tests
 
 |   |-- contract/              # переиспользуемые conformance-тесты драйверов
 
@@ -169,6 +183,12 @@
     |-- qwen-ollama-integration.md
 
     |-- qwen-session.md
+
+    |-- agent-image.md
+
+    |-- orchestrator-api-foundation.md
+
+    |-- agent-lifecycle-api.md
 
     `-- decisions/
 
@@ -199,7 +219,47 @@ adapter and must remain outside domain/application code.
 TASK-006 adds the separate `AgentInteraction` application port and
 `QwenSessionAdapter`. Session state is stored under one configured per-Agent
 directory; Qwen-native UUIDs, transcripts, paths, and Docker execution remain
-inside the adapter. HTTP chat schemas and lifecycle wiring remain later tasks.
+inside the adapter. TASK-009 wires Session create/delete into Agent lifecycle;
+TASK-010 adds HTTP chat schemas and concurrent-turn rejection.
+
+TASK-007 adds `agent_image/`: a deliberately small Docker build context with a
+pinned Qwen Code base image and non-root `agent-runtime` launcher. Ollama,
+model weights, credentials, and HTTP/API wiring remain outside the image.
+
+TASK-008 adds `configuration.py`, `http_api.py`, and an explicit
+`ApplicationComposition`. Its foundation established health/readiness, OpenAPI,
+and redacted errors; lifecycle routes are added only by TASK-009.
+
+TASK-009 adds the runtime-neutral `AgentLifecycleService`, an explicit
+`AgentRepository` port with a process-local adapter, and HTTP create/inspect/
+start/stop/delete routes. TASK-010 adds message/history; TASK-011 adds turn-bound SSE with committed response content.
+
+TASK-010 adds `application/agent_chat.py`, `domain/message.py`, and
+`adapters/docker_agent_qwen.py`. HTTP turns execute in the existing Agent
+container through `AgentInteraction`. The repository owns bounded public
+message pairs; adapter native-state rollback and recovery markers keep failed
+turns explicit. The HTTP contract is in `docs/agent-chat-api.md`, and
+ADR-0006 records commit/recovery ownership. Focused checks:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/unit/test_agent_chat.py tests/unit/test_docker_agent_qwen.py tests/unit/test_qwen_session.py tests/api/test_agent_chat_api.py -q
+$env:RUN_QWEN_OLLAMA_INTEGRATION='1'
+$env:QWEN_OLLAMA_MODEL='qwen3:1.7b'
+.\.venv\Scripts\python.exe -m pytest tests/integration/test_agent_chat_api.py -q
+```
+
+TASK-011 adds `http_streaming.py`, transport-only typed SSE envelopes and
+bounded delivery for `POST /agents/{agent_id}/messages/stream`. JSON and SSE
+share `AgentChatService.begin` and the same owned turn completion. Content is
+buffered until commit; this is not token streaming. There is no replay or
+Agent-wide event subscription. Contract and evidence: `docs/agent-streaming-api.md`;
+protocol decision: ADR-0007. Focused commands:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/api/test_agent_streaming.py tests/unit/test_agent_chat.py tests/api/test_agent_chat_api.py -q
+$env:RUN_QWEN_OLLAMA_INTEGRATION='1'
+.\.venv\Scripts\python.exe -m pytest tests/integration/test_agent_streaming.py -q
+```
 
 ```text
 
@@ -252,6 +312,17 @@ ollama pull qwen3:1.7b
 $env:RUN_QWEN_OLLAMA_INTEGRATION="1"
 $env:QWEN_OLLAMA_MODEL="qwen3:1.7b"
 .\.venv\Scripts\python.exe -m pytest tests/integration/test_qwen_session.py -q
+
+# Собрать universal agent image и проверить Qwen turn/resume через DockerRuntime.
+docker build --pull=false --tag uar-task007-agent:local agent_image
+.\.venv\Scripts\python.exe -m pytest tests/integration/test_agent_image.py -q
+
+# Проверить Orchestrator HTTP foundation с TestClient и сгенерированным OpenAPI.
+.\.venv\Scripts\python.exe -m pytest tests/api/test_orchestrator_foundation.py -q
+
+# Проверить Agent lifecycle policy/API и реальный Docker lifecycle universal image.
+.\.venv\Scripts\python.exe -m pytest tests/unit/test_agent_lifecycle.py tests/api/test_agent_lifecycle_api.py -q
+.\.venv\Scripts\python.exe -m pytest tests/integration/test_agent_lifecycle_api.py -q
 
 # Запустить все документированные проверки качества.
 
@@ -309,7 +380,7 @@ focused command is:
 
 rg --files
 
-rg -n '^Status: (TODO|ACTIVE|DONE|BLOCKED)$' TASKS.md
+rg -n '^Статус: (TODO|ACTIVE|DONE|BLOCKED)$' TASKS.md
 
 git status --short -- .
 

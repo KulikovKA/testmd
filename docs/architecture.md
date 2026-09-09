@@ -1,5 +1,5 @@
 # Архитектура Universal Agent Runtime
-Статус: целевая архитектура установлена в TASK-000. TASK-001 предоставляет Python-каркас; TASK-002 реализует нейтральный к runtime управляющий контракт; TASK-004 реализует `DockerRuntime`; TASK-006 реализует отдельный нейтральный conversation/session port и persistent Qwen adapter. API Orchestrator пока не существует.
+Status: TASK-000 establishes the architecture; TASK-001 provides the Python scaffold; TASK-002 defines runtime control; TASK-004 implements DockerRuntime; TASK-006 implements persistent interaction; TASK-007 supplies the universal agent image; TASK-008 establishes HTTP composition; TASK-009 provides lifecycle APIs; TASK-010 implements JSON chat and bounded public history; TASK-011 adds turn-bound SSE with committed response content.
 
 ## Назначение и область
 Система создаёт и управляет изолированными экземплярами CLI-агентов через нейтральный к runtime Agent Orchestrator. Агент сохраняет состояние диалога, получает настроенные Skills и узко ограниченные Tools и использует внешний inference-сервис. Docker является локальным backend исполнения; Kata Containers — более поздний backend для корпоративной среды.
@@ -84,16 +84,16 @@ Backend IDs, container objects, Kata objects и необработанные cre
 ### AgentRuntime
 `AgentRuntime` — обращённый к application управляющий порт для изолированной execution unit. Его минимальная ответственность — create, start, status, stop и delete. Он не владеет семантикой диалога.
 Реализованный асинхронный протокол, типизированные требования, observations, errors, правила идемпотентности и семантика ограниченных по времени вызовов определены в [контракте управления runtime](runtime-contract.md). `RuntimeHandle` — непрозрачная, привязанная к Agent project reference. `RuntimeObservation` содержит `ExecutionState` и независимый `Readiness`, но никогда не содержит принадлежащее Orchestrator состояние жизненного цикла Agent.
-Контракт не предоставляет типы Docker/Kata SDK. Ходы Agent проходят через отдельный нейтральный к runtime `AgentInteraction` port, реализованный в TASK-006. Если доступ к Agent требует backend-specific механики, соответствующий adapter всё равно остаётся за этим отдельным портом; это не разрешает Orchestrator напрямую вызывать Docker/Kata. HTTP use cases и сериализация запросов относятся к TASK-010.
+The contract exposes no Docker/Kata SDK types. Agent turns use the separate runtime-neutral `AgentInteraction` port from TASK-006. Backend transport stays in its adapter; Orchestrator never calls Docker/Kata directly. TASK-010 implements HTTP turns with per-Agent BUSY reservation and overlap rejection.
 Drivers преобразуют декларативные требования, такие как workspace, environment, resource limits, network destinations и readiness, в backend operations. Общий conformance suite должен повторно использоваться сначала для `DockerRuntime`, а затем для `KataRuntime`.
 
 ### Workspace
 Workspace — принадлежащая агенту граница файловой системы. Он содержит только данные, необходимые этому агенту, включая adapter-owned Qwen session artifacts, проверенные в TASK-006. Workspace не должен совместно использоваться разными агентами. Runtime-драйвер отображает нейтральную спецификацию workspace в Docker volume/bind mount или совместимое с Kata storage, не раскрывая это отображение application layer.
-Stop сохраняет границу workspace/session Agent; успешный delete удаляет принадлежащее runtime storage и завершает жизненный цикл runtime identity Agent. TASK-002 определяет владение retry и partial-cleanup в управляющем контракте. TASK-006 определяет Session cleanup; его связывание с lifecycle Orchestrator остаётся в TASK-009/TASK-014.
+Stop сохраняет границу workspace/session Agent; успешный delete удаляет принадлежащее runtime storage и завершает жизненный цикл runtime identity Agent. TASK-002 определяет владение retry и partial-cleanup в управляющем контракте. TASK-006 определяет Session cleanup; TASK-009 связывает его с lifecycle delete после runtime cleanup и сохраняет Agent record при partial failure.
 
 ### Session
 Session — стабильная логическая identity диалога, связанная с одним Agent. Несколько сообщений для этого Agent повторно используют её; создание новой независимой Qwen-сессии для каждого сообщения запрещено. TASK-006 связывает generic `SessionReference` с opaque native Qwen UUID, обязательным native transcript и versioned project-owned JSONL history в одном per-Agent каталоге. Каждый новый Qwen process использует `--resume`, а валидированная project history повторно передаётся как authoritative context.
-Публичный message log и внутренний context Qwen являются отдельными записями: adapter history обеспечивает восстановление context, тогда как API-visible timestamps/IDs и retrieval contract остаются в TASK-010.
+Public messages and native Qwen context have separate ownership: TASK-010 stores committed message pairs with IDs, UTC timestamps and sequence numbers in the Agent repository, while adapter history reconstructs context. Public metadata recovery after Orchestrator restart remains NOT VERIFIED with the current in-memory repository.
 
 ### Configuration
 Configuration Agent валидируется до provisioning и разделяется по областям ответственности:
@@ -119,18 +119,18 @@ Tools — явные capabilities с типизированными операц
 | Компонент | Основная ответственность | Примечания по границе |
 |---|---|---|
 | Client | Отправляет HTTP-команды жизненного цикла/сообщений и читает результаты | Сначала Postman/HTTP; UI отложен |
-| HTTP adapter | Валидирует transport data и отображает application errors в HTTP | Точные endpoints относятся к TASK-008..TASK-011 |
+| HTTP adapter | Validates transport inputs and exposes health/readiness/OpenAPI, lifecycle, messages and redacted errors | Foundation: TASK-008; lifecycle: TASK-009; non-streaming chat/history: TASK-010; TASK-011 provides turn-bound SSE with buffered committed content |
 | Agent Orchestrator | Координирует use cases Agent, переходы состояний, выбор capabilities и отчётность об ошибках | Зависит только от принадлежащих проекту ports |
-| Agent metadata store | Хранит configuration Agent, lifecycle и opaque references | Технология persistence отложена; наличие database не предполагается |
+| Agent metadata store | Хранит configuration Agent, lifecycle, opaque references и idempotency tombstones | TASK-009 использует explicit application-lifetime `InMemoryAgentRepository`; durable crash recovery остаётся `NOT VERIFIED` |
 | AgentRuntime | Определяет нейтральный к runtime контракт lifecycle/control execution unit | Реализован в TASK-002 с общими conformance tests; семантика диалога остаётся в interaction port |
 | Agent interaction port | Обменивается ходами с CLI-agent и связывает их с его логической Session | Реализован в TASK-006; отделён от runtime control и не определяет HTTP message schemas |
-| DockerRuntime | Отображает порт на Docker для локальной разработки | Реализован в TASK-004; вызовов Docker вне этого adapter нет |
+| DockerRuntime | Отображает порт на Docker для локальной разработки | Реализован в TASK-004; TASK-007 добавляет явно объявляемый local bridge profile для проверяемой связи agent image с Ollama; вызовов Docker вне adapter/test harness нет |
 | KataRuntime | Будущее отображение того же контракта на Kata | Локально не реализуется до TASK-016 |
-| Qwen adapter/launcher | Запускает Qwen Code и взаимодействует с ним через проверенные возможности CLI | Qwen Code не является моделью Ollama |
+| Qwen adapter/launcher | `QwenSessionAdapter` владеет persistent interaction; `agent_image` предоставляет переносимый CLI launcher execution unit | Qwen Code не является моделью Ollama; image не определяет HTTP API или Tool semantics |
 | Ollama | Размещает настроенную Qwen LLM вне agent runtime | Существующий сервис, доступный по сети |
 | Skill loader | Передаёт выбранные behavior packages одному агенту | Не может предоставлять незаявленные tools |
 | Tool adapter | Предоставляет Agent узкие одобренные операции | Не является произвольным REST proxy |
-| Workspace/session storage | Изолирует per-agent manifest, project history, native Qwen transcript и workspace | Реализовано adapter-local в TASK-006; lifecycle wiring отложен |
+| Workspace/session storage | Изолирует per-agent manifest, project history, native Qwen transcript и workspace | Реализовано adapter-local в TASK-006; create/delete lifecycle wiring реализовано в TASK-009 |
 
 ## Модель жизненного цикла
 Минимальные логические состояния: `CREATING`, `STARTING`, `READY`, `BUSY`, `STOPPING`, `STOPPED` и `FAILED`.
@@ -152,7 +152,7 @@ stateDiagram-v2
     STOPPED --> [*]: delete
     FAILED --> [*]: delete
 ```
-Эта модель намеренно компактна. `delete` удаляет aggregate после backend cleanup, а не вводит постоянное состояние `DELETED`. Runtime contract определяет идемпотентные вызовы, восстановление после прерываний и поведение partial-cleanup. Stop/delete уровня Agent во время `BUSY`, восстановление из `FAILED` и публичная concurrent-request policy остаются обязанностью TASK-009. Записи удаления driver являются recovery metadata, а не новым состоянием жизненного цикла Agent.
+The model stays compact: delete removes the aggregate after backend cleanup; driver tombstones are recovery metadata, not a DELETED lifecycle state. TASK-009 serializes lifecycle operations and supports stop/delete recovery from FAILED. TASK-010 rejects lifecycle mutations while BUSY, preserves history across stop/start, and prevents start from clearing an unrecoverable conversation flag.
 Orchestrator владеет политикой логических переходов состояний. Runtime-драйвер сообщает нейтральные к runtime observations и failures; он не пропускает backend state names в domain. Запущенный runtime сам по себе не означает `READY` Agent: readiness также требует ответа настроенного пути взаимодействия с агентом. Сообщение может начаться только когда Agent находится в `READY`, и в рамках PoC один Agent обрабатывает не более одного turn одновременно.
 
 ## Основные управляющие потоки и потоки данных
@@ -162,7 +162,7 @@ Orchestrator владеет политикой логических перехо
 3. Настроенный driver AgentRuntime создаёт изолированные runtime и workspace и возвращает opaque handle.
 4. Успешный provisioning переводит Agent в `STOPPED`; start переводит его через `STARTING`.
 5. Runtime observation и agent-level readiness probe подтверждают как execution unit, так и interaction path. Только после этого Agent становится `READY`.
-Будет ли `POST /agents` выполнять только create или create-and-start, намеренно отложено до TASK-009; внутренние lifecycle operations остаются раздельными.
+TASK-009 фиксирует `POST /agents` как create-only operation: успешный provisioning возвращает `STOPPED`, а start вызывается отдельно.
 
 ### Stateful-ход сообщения
 1. Orchestrator принимает сообщение только для Agent в `READY` и сериализует конкурентные turns для одного Agent.
@@ -171,7 +171,7 @@ Orchestrator владеет политикой логических перехо
 4. Qwen Code вызывает настроенный внешний inference endpoint Ollama.
 5. Qwen Code может вызывать только выбранные операции Tool; tool adapter вызывает настроенный mock/corporate service.
 6. Response и соответствующая metadata сообщения сохраняются, после чего Agent возвращается в `READY`; диагностированный невосстанавливаемый failure приводит к `FAILED`.
-Механика Qwen resume и adapter persistence определена TASK-006. HTTP-visible message metadata, retrieval и concurrent-turn policy остаются результатом TASK-010.
+Qwen resume and native persistence follow TASK-006. TASK-010 defines [public chat/history](agent-chat-api.md), overlap rejection, cancellation ownership, known-failure rollback and fatal recovery flags. Composed Docker interaction executes Qwen inside the existing Agent container; native state is mirrored from the adapter-owned recovery copy into that same workspace volume. Lifecycle and interaction remain independent ports.
 
 ### Остановка и удаление
 1. Stop переводит подходящий Agent в `STOPPING` и просит AgentRuntime остановить instance.
@@ -189,8 +189,13 @@ DELETE /agents/{agent_id}
 POST   /agents/{agent_id}/messages
 GET    /agents/{agent_id}/messages
 ```
-`GET /agents/{agent_id}/events` и протокол SSE отложены до TASK-011. Endpoint payloads, семантика create/start, status codes, error schema, polling/readiness behavior и pagination принадлежат соответствующим API-задачам. Frontend не входит в scope.
-TASK-009 должна выбрать и задокументировать нейтральные к runtime HTTP-операции для явного запуска и остановки существующего Agent. Их точная URI/action-форма намеренно не фиксируется в TASK-000. Stop должен оставаться отличным от delete, чтобы сохранение session/workspace при stop/start можно было проверить через публичный API.
+TASK-011 selects `POST /agents/{agent_id}/messages/stream` as the turn-bound SSE equivalent; no GET subscription/replay route exists. The stream emits started, keep-alive comments, then committed content/completed or error. It is not token streaming. Endpoint payloads, семантика create/start, status codes, error schema, polling/readiness behavior и pagination принадлежат соответствующим API-задачам. Frontend не входит в scope.
+TASK-009 выбрала и задокументировала нейтральные к runtime операции
+`POST /agents/{agent_id}/start` и
+`POST /agents/{agent_id}/stop`. `POST /agents` выполняет только provisioning и
+возвращает `STOPPED`; он не объединяет create со start. Exact schemas, status
+codes, idempotency and recovery behavior are documented in
+[agent-lifecycle-api.md](agent-lifecycle-api.md).
 
 ## Отображение развёртывания
 ### Локальная фаза
@@ -201,6 +206,7 @@ Qwen Code agent -> configurable host/external Ollama
 Qwen Code agent -> restricted tool -> mock Task REST API
 ```
 Ollama не включается в agent image. Host routing является deployment configuration и не должен быть жёстко привязан к `localhost`, потому что `localhost` внутри container обозначает сам container.
+TASK-007 фиксирует [контракт универсального agent image](agent-image.md): Qwen Code и launcher входят в образ, endpoint/model/credential — только runtime configuration, а Skills/Tools имеют явные per-Agent injection slots. Локальный bridge profile доказывает connectivity к `host.docker.internal` для live test, но не является destination egress enforcement; production network isolation остаётся `NOT VERIFIED`.
 
 ### Корпоративная фаза
 ```text
@@ -241,9 +247,13 @@ Qwen Code agent -> restricted tool -> approved corporate REST service
 Python 3.11+ packaging и неактивный composition root установлены в TASK-001.
 TASK-002 устанавливает runtime control signatures и семантику lifecycle retry/recovery в [runtime-contract.md](runtime-contract.md).
 TASK-005 проверяет фактическую конфигурацию Qwen Code `0.23.1` для внешнего Ollama, headless `stream-json` protocol и ограниченный `read_file` из официального container image; воспроизводимый probe и ограничения описаны в [qwen-ollama-integration.md](qwen-ollama-integration.md).
-TASK-006 реализует `AgentInteraction` и combined native/project-owned Qwen Session persistence, описанную в [qwen-session.md](qwen-session.md). Следующее остаётся отложенным:
-- HTTP schemas и отображение create/start (TASK-008..TASK-010);
-- SSE или другой streaming-механизм после того, как будет известно фактическое поведение output Qwen (TASK-011);
+TASK-006 реализует `AgentInteraction` и combined native/project-owned Qwen Session persistence, описанную в [qwen-session.md](qwen-session.md).
+TASK-007 добавляет закреплённый universal agent image и проверяет native Qwen turn/resume через `DockerRuntime`; его нейтральный launcher contract и local bridge limitation описаны в [agent-image.md](agent-image.md).
+TASK-008 добавляет [HTTP foundation](orchestrator-api-foundation.md) с явным composition root, TestClient/OpenAPI validation и только `/healthz`/`/readyz`.
+TASK-009 добавляет [Agent lifecycle API](agent-lifecycle-api.md), explicit in-memory metadata port/adapter и проверенный Docker lifecycle через universal image.
+TASK-010 implements [non-streaming chat/history](agent-chat-api.md) through `AgentChatService` and `AgentInteraction`, including `READY -> BUSY -> READY`, per-Agent rejection, bounded retrieval and explicit recovery. TASK-011 adds [turn-bound SSE](agent-streaming-api.md) through the same `AgentChatService.begin` and completion logic. Public turn IDs are allocated at admission; disconnect detaches delivery without releasing BUSY. Per-send timeout and on-demand keep-alive avoid an event queue. Remaining work:
+
+- Partial-token delivery and remote proxy behavior remain NOT VERIFIED; TASK-011 intentionally exposes committed response content, not token deltas;
 - формат упаковки Skill и schema ограниченного Tool (TASK-012/TASK-013);
 - capabilities Kata, отображение storage/network и isolation gaps (с TASK-015 и далее).
 Каждый gate должен разрешаться на основании доказательств из repository и, где требуется, актуальной upstream-документации или исполняемого integration probe. Значимые отклонения от границ этого документа требуют ADR.
@@ -254,3 +264,6 @@ TASK-006 реализует `AgentInteraction` и combined native/project-owned 
 - [ADR-0003: Граница внешнего inference](decisions/0003-external-inference-boundary.md)
 - [ADR-0004: Владение runtime retry и recovery](decisions/0004-runtime-retry-and-recovery-ownership.md)
 - [ADR-0005: Qwen Session persistence ownership](decisions/0005-qwen-session-persistence.md)
+- [ADR-0006: Public chat commit and recovery ownership](decisions/0006-public-chat-commit-and-recovery.md)
+
+- [ADR-0007: Turn-bound committed SSE](decisions/0007-turn-bound-committed-sse.md)

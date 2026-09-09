@@ -21,6 +21,7 @@ from universal_agent_runtime.application.ports.runtime_values import (
     CreateRuntimeRequest,
     DeleteResult,
     ExecutionState,
+    NetworkDestination,
     OperationOptions,
     Readiness,
     RuntimeHandle,
@@ -38,12 +39,27 @@ class DockerWorkload:
     user: str
     workspace_target: str = "/workspace"
     healthcheck: Mapping[str, Any] | None = None
+    network_mode: str = "none"
+    network_destinations: tuple[NetworkDestination, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.image or not self.command or not self.user:
             raise ValueError("Docker workload image, command and user are required")
         if not self.workspace_target.startswith("/"):
             raise ValueError("workspace_target must be an absolute container path")
+        if self.network_mode not in {"none", "bridge"}:
+            raise ValueError("network_mode must be none or bridge")
+        if not isinstance(self.network_destinations, tuple) or not all(
+            isinstance(destination, NetworkDestination)
+            for destination in self.network_destinations
+        ):
+            raise ValueError("network_destinations must be typed immutable values")
+        if len(self.network_destinations) != len(set(self.network_destinations)):
+            raise ValueError("network_destinations must not contain duplicates")
+        if self.network_mode == "none" and self.network_destinations:
+            raise ValueError("network_mode none cannot declare destinations")
+        if self.network_mode == "bridge" and not self.network_destinations:
+            raise ValueError("bridge mode requires declared destinations")
 
 
 @dataclass
@@ -181,7 +197,7 @@ class DockerRuntime:
 
     def _validate_request(self, request: CreateRuntimeRequest) -> DockerWorkload:
         workload = self._workloads.get(request.workload)
-        if workload is None or request.network:
+        if workload is None or request.network != workload.network_destinations:
             raise self._failure(
                 Op.CREATE, request.agent_id, Code.CONFIGURATION_REJECTED
             )
@@ -378,8 +394,8 @@ class DockerRuntime:
                     user=workload.user,
                     environment=self._environment(request),
                     labels=self._labels(record, "runtime"),
-                    network_disabled=True,
-                    network_mode="none",
+                    network_disabled=workload.network_mode == "none",
+                    network_mode=workload.network_mode,
                     nano_cpus=int(request.resources.cpu_cores * 1_000_000_000),
                     mem_limit=request.resources.memory_bytes,
                     read_only=True,

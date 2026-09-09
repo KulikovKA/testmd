@@ -1,0 +1,125 @@
+#!/bin/sh
+set -eu
+
+workspace=${UAR_WORKSPACE:-/workspace}
+qwen_home=${UAR_QWEN_HOME:-"$workspace/.qwen-home"}
+skills_dir=${UAR_SKILLS_DIR:-"$workspace/.agent/skills"}
+tools_dir=${UAR_TOOLS_DIR:-"$workspace/.agent/tools"}
+
+fail() {
+    printf '%s\n' "agent-runtime: $1" >&2
+    exit 64
+}
+
+prepare_workspace() {
+    mkdir -p "$workspace" "$qwen_home" "$skills_dir" "$tools_dir"
+    test -w "$workspace" || fail "workspace is not writable"
+    test -w "$qwen_home" || fail "Qwen home is not writable"
+    test -d "$skills_dir" || fail "skills directory is unavailable"
+    test -d "$tools_dir" || fail "tools directory is unavailable"
+}
+
+require_positive_integer() {
+    value=$1
+    label=$2
+    case "$value" in
+        ''|*[!0-9]*) fail "$label must be a positive integer" ;;
+    esac
+    test "$value" -gt 0 || fail "$label must be a positive integer"
+}
+
+run_turn() {
+    mode=''
+    session_id=''
+    prompt=''
+
+    while test "$#" -gt 0; do
+        case "$1" in
+            --session-id)
+                test "$#" -ge 2 || fail "--session-id requires a value"
+                mode='new'
+                session_id=$2
+                shift 2
+                ;;
+            --resume)
+                test "$#" -ge 2 || fail "--resume requires a value"
+                mode='resume'
+                session_id=$2
+                shift 2
+                ;;
+            --prompt)
+                test "$#" -ge 2 || fail "--prompt requires a value"
+                prompt=$2
+                shift 2
+                ;;
+            *) fail "unsupported turn argument" ;;
+        esac
+    done
+
+    test -n "$mode" || fail "one of --session-id or --resume is required"
+    test -n "$session_id" || fail "session ID is required"
+    test -n "$prompt" || fail "prompt is required"
+    : "${QWEN_OLLAMA_BASE_URL:?QWEN_OLLAMA_BASE_URL is required}"
+    : "${QWEN_OLLAMA_MODEL:?QWEN_OLLAMA_MODEL is required}"
+    : "${OPENAI_API_KEY:?OPENAI_API_KEY is required}"
+    case "$QWEN_OLLAMA_BASE_URL" in
+        http://*/v1|https://*/v1) ;;
+        *) fail "QWEN_OLLAMA_BASE_URL must be an explicit HTTP(S) /v1 URL" ;;
+    esac
+    case "$QWEN_OLLAMA_MODEL" in
+        ''|*[[:space:]]*) fail "QWEN_OLLAMA_MODEL is invalid" ;;
+    esac
+
+    max_wall_time=${QWEN_AGENT_MAX_WALL_TIME_SECONDS:-300}
+    max_session_turns=${QWEN_AGENT_MAX_SESSION_TURNS:-6}
+    require_positive_integer "$max_wall_time" QWEN_AGENT_MAX_WALL_TIME_SECONDS
+    require_positive_integer "$max_session_turns" QWEN_AGENT_MAX_SESSION_TURNS
+    prepare_workspace
+
+    export HOME="$qwen_home"
+    export QWEN_HOME="$qwen_home"
+    common_args='--bare --chat-recording --auth-type openai'
+    set -- qwen $common_args \
+        --openai-base-url "$QWEN_OLLAMA_BASE_URL" \
+        --model "$QWEN_OLLAMA_MODEL" \
+        --system-prompt "You are a concise stateful assistant. Answer only the current user message. Do not use tools." \
+        --output-format stream-json \
+        --max-session-turns "$max_session_turns" \
+        --max-tool-calls 0 \
+        --max-wall-time "${max_wall_time}s" \
+        --exclude-tools read_file,edit,notebook_edit,run_shell_command,get_goal,update_goal
+    if test "$mode" = new; then
+        set -- "$@" --session-id "$session_id"
+    else
+        set -- "$@" --resume "$session_id"
+    fi
+    exec "$@" -p "/think $prompt"
+}
+
+case "${1:-serve}" in
+    serve)
+        shift
+        test "$#" -eq 0 || fail "serve accepts no arguments"
+        prepare_workspace
+        trap 'exit 0' INT TERM
+        while :; do sleep 3600 & wait "$!"; done
+        ;;
+    readiness)
+        shift
+        test "$#" -eq 0 || fail "readiness accepts no arguments"
+        prepare_workspace
+        command -v qwen >/dev/null 2>&1 || fail "Qwen Code is unavailable"
+        ;;
+    turn)
+        shift
+        run_turn "$@"
+        ;;
+    version)
+        shift
+        test "$#" -eq 0 || fail "version accepts no arguments"
+        printf '%s\n' 'agent-runtime qwen-code=0.23.1'
+        ;;
+    *)
+        fail "expected serve, readiness, turn, or version"
+        ;;
+esac
