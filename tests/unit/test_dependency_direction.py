@@ -3,6 +3,9 @@
 import ast
 from pathlib import Path
 
+from universal_agent_runtime.application.ports.agent_interaction import (
+    AgentInteraction,
+)
 from universal_agent_runtime.application.ports.agent_runtime import AgentRuntime
 
 
@@ -36,3 +39,10 @@ def test_domain_and_application_import_only_inward_or_stdlib() -> None:
 def test_lifecycle_port_does_not_grow_a_conversation_transport() -> None:
     public = {name for name in AgentRuntime.__dict__ if not name.startswith("_")}
     assert public == {"create", "start", "status", "stop", "delete"}
+
+
+def test_conversation_port_stays_separate_from_lifecycle_control() -> None:
+    public = {
+        name for name in AgentInteraction.__dict__ if not name.startswith("_")
+    }
+    assert public == {"create_session", "turn", "delete_session"}

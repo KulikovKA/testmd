@@ -120,17 +120,23 @@
 
 |-- src/
 
+|   |-- qwen_ollama_probe/     # bounded standalone Qwen Code/Ollama verification
+
 |   `-- universal_agent_runtime/
 
 |       |-- application/
 
-|       |   `-- ports/          # AgentRuntime, нейтральные значения и ошибки
+|       |   `-- ports/          # AgentRuntime, AgentInteraction, neutral values/errors
 
 |       |-- domain/
 
-|       |   `-- identifiers.py
+|       |   `-- identifiers.py  # AgentId, WorkspaceId, SessionId
 
 |       |-- adapters/
+
+|       |   |-- docker_runtime.py # локальный Docker driver для AgentRuntime
+
+|       |   `-- qwen_session.py   # persistent Qwen adapter for AgentInteraction
 
 |       |-- agent_assets/
 
@@ -144,6 +150,10 @@
 
 |   |-- runtime_support/       # test harness и детерминированный fake
 
+|   |-- docker_assets/         # безвредный purpose-built image fixture
+
+|   |-- integration/           # реальные adapter integration tests
+
 |   |-- unit/                  # тесты валидации и границ зависимостей
 
 |   `-- test_composition.py
@@ -154,15 +164,23 @@
 
     |-- runtime-contract.md
 
+    |-- docker-runtime.md
+
+    |-- qwen-ollama-integration.md
+
+    |-- qwen-session.md
+
     `-- decisions/
 
         |-- 0001-runtime-port-and-driver-boundary.md
 
         |-- 0002-per-agent-isolation-boundary.md
 
-        |-- 0003-external-inference-boundary.md
+      |-- 0003-external-inference-boundary.md
 
-        `-- 0004-runtime-retry-and-recovery-ownership.md
+        |-- 0004-runtime-retry-and-recovery-ownership.md
+
+        `-- 0005-qwen-session-persistence.md
 
 ```
 
@@ -172,6 +190,16 @@ TASK-003 also adds the independent `src/mock_task_service/` service-plane packag
 `tests/api/test_mock_task_api.py`, focused store/configuration tests, and
 `docs/mock-task-api.md`. It must remain independent of `universal_agent_runtime`,
 Orchestrator, Docker, Qwen, corporate services, and task-decomposition behavior.
+
+TASK-005 adds the independent `src/qwen_ollama_probe/` verification package and
+`tests/unit/test_qwen_ollama_probe.py`. It starts pinned Qwen Code in a container
+against an external configured Ollama service; it is not a conversation/session
+adapter and must remain outside domain/application code.
+
+TASK-006 adds the separate `AgentInteraction` application port and
+`QwenSessionAdapter`. Session state is stored under one configured per-Agent
+directory; Qwen-native UUIDs, transcripts, paths, and Docker execution remain
+inside the adapter. HTTP chat schemas and lifecycle wiring remain later tasks.
 
 ```text
 
@@ -187,9 +215,9 @@ tests/           unit-, port-contract-, integration- и E2E-тесты
 
 ```
 
-TASK-001 использует Python 3.11 или новее и `setuptools` со структурой `src/`. Прямых
-
-runtime-зависимостей нет. Зафиксированные инструменты разработки — pytest,
+TASK-001 использует Python 3.11 или новее и `setuptools` со структурой `src/`.
+TASK-003 добавил FastAPI/Uvicorn, а TASK-004 — Docker SDK как закреплённые прямые
+runtime dependencies. Зафиксированные инструменты разработки — pytest,
 
 Ruff и mypy; их версии указаны в `pyproject.toml`. Это
 
@@ -210,6 +238,20 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+
+# Проверить общий AgentRuntime contract на fake и реальном Docker driver.
+.\.venv\Scripts\python.exe -m pytest tests/contract tests/integration/test_docker_runtime.py -q
+
+# Проверить Qwen Code/Ollama с маленькой thinking-моделью из container context.
+ollama pull qwen3:0.6b
+.\.venv\Scripts\python.exe -m qwen_ollama_probe prompt
+.\.venv\Scripts\python.exe -m qwen_ollama_probe tool
+
+# Проверить persistent Session с более надёжной маленькой thinking-моделью.
+ollama pull qwen3:1.7b
+$env:RUN_QWEN_OLLAMA_INTEGRATION="1"
+$env:QWEN_OLLAMA_MODEL="qwen3:1.7b"
+.\.venv\Scripts\python.exe -m pytest tests/integration/test_qwen_session.py -q
 
 # Запустить все документированные проверки качества.
 

@@ -28,3 +28,13 @@ class WorkspaceId:
 
     def __post_init__(self) -> None:
         validate_identifier(self.value)
+
+
+@dataclass(frozen=True)
+class SessionId:
+    """Stable logical conversation identity owned by the Agent."""
+
+    value: str
+
+    def __post_init__(self) -> None:
+        validate_identifier(self.value)
