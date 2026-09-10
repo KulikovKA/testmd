@@ -55,6 +55,16 @@ class _ReadyRuntime(FakeRuntime):
         return await self.status(handle, options=options)
 
 
+class _CapturingRuntime(_ReadyRuntime):
+    captured_request: CreateRuntimeRequest | None = None
+
+    async def create(
+        self, request: CreateRuntimeRequest, *, options: OperationOptions
+    ) -> RuntimeObservation:
+        self.captured_request = request
+        return await super().create(request, options=options)
+
+
 def _tokens(*values: str) -> Iterator[str]:
     yield from values
 
@@ -121,6 +131,26 @@ def test_create_is_idempotent_and_snapshots_unique_agent_boundaries() -> None:
         assert second.agent.session != first.agent.session
 
     asyncio.run(scenario())
+
+
+def test_only_tool_capabilities_are_provisioned_to_the_runtime() -> None:
+    runtime = _CapturingRuntime()
+    service, _ = _service(runtime, FakeInteraction(), "one")
+
+    async def scenario() -> None:
+        await service.create(
+            CreateAgentCommand(
+                "request-one", ("create_task",), ("get_task", "update_task")
+            )
+        )
+
+    asyncio.run(scenario())
+    assert runtime.captured_request is not None
+    environment = {
+        item.name: item.value for item in runtime.captured_request.environment
+    }
+    assert environment["UAR_AGENT_TOOL_CAPABILITIES"] == "get_task,update_task"
+    assert environment["UAR_AGENT_SKILL_PACKAGES"] == "create_task"
 
 
 def test_start_stop_delete_are_idempotent_and_preserve_session_until_delete() -> None:

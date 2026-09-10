@@ -25,6 +25,10 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"universal_agent_runtime.adapters" = ["*.mjs"]
+"universal_agent_runtime.agent_assets" = ["task-decomposition/*.json", "task-decomposition/*.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

@@ -2,6 +2,7 @@
 
 import inspect
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 from universal_agent_runtime.adapters.docker_agent_qwen import DockerAgentQwenRunner
 from universal_agent_runtime.adapters.docker_runtime import (
@@ -93,7 +94,11 @@ def compose_application(
             max_response_characters=settings.chat_max_response_characters,
             max_history_messages=settings.chat_max_history_messages,
             max_history_page_size=settings.chat_max_history_page_size,
-            redacted_values=(settings.qwen_api_key,),
+            redacted_values=tuple(
+                value
+                for value in (settings.qwen_api_key, settings.task_api_token)
+                if value
+            ),
         ),
     )
     return ApplicationComposition(settings, runtime, interaction, lifecycle, chat)
@@ -106,9 +111,19 @@ def _network_destinations(
         return ()
     assert settings.docker_network_host is not None
     assert settings.docker_network_port is not None
-    return (
-        NetworkDestination(settings.docker_network_host, settings.docker_network_port),
-    )
+    destinations = [
+        NetworkDestination(settings.docker_network_host, settings.docker_network_port)
+    ]
+    if settings.task_api_base_url is not None:
+        parsed = urlparse(settings.task_api_base_url)
+        assert parsed.hostname is not None
+        destinations.append(
+            NetworkDestination(
+                parsed.hostname,
+                parsed.port or (443 if parsed.scheme == "https" else 80),
+            )
+        )
+    return tuple(dict.fromkeys(destinations))
 
 
 def _compose_runtime(settings: ApplicationSettings) -> AgentRuntime:
@@ -135,9 +150,14 @@ def _compose_runtime(settings: ApplicationSettings) -> AgentRuntime:
     )
 
     def resolve_secret(secret_id: str) -> str:
-        if secret_id != settings.qwen_api_key_secret_id:
-            raise KeyError("unknown secret reference")
-        return settings.qwen_api_key
+        if secret_id == settings.qwen_api_key_secret_id:
+            return settings.qwen_api_key
+        if (
+            secret_id == settings.task_api_token_secret_id
+            and settings.task_api_token is not None
+        ):
+            return settings.task_api_token
+        raise KeyError("unknown secret reference")
 
     return DockerRuntime(
         {settings.docker_workload_key: workload}, secret_resolver=resolve_secret
@@ -150,6 +170,16 @@ def _compose_interaction(settings: ApplicationSettings) -> AgentInteraction:
         base_url=settings.qwen_base_url,
         model=settings.qwen_model,
         api_key=settings.qwen_api_key,
+        task_api_base_url=settings.task_api_base_url,
+        task_api_token=settings.task_api_token,
+        task_api_timeout_seconds=settings.task_api_timeout_seconds,
+        task_api_max_response_bytes=settings.task_api_max_response_bytes,
+        task_mcp_server_path=(
+            f"{settings.docker_workspace_target}/.uar-tools/task_rest_mcp_server.mjs"
+        ),
+        task_mcp_config_path=(
+            f"{settings.docker_workspace_target}/.qwen-home/task-mcp-config.json"
+        ),
     )
     return QwenSessionAdapter(
         config,
@@ -180,7 +210,20 @@ def _compose_lifecycle(
                 EnvironmentVariable("QWEN_OLLAMA_BASE_URL", settings.qwen_base_url),
                 EnvironmentVariable("QWEN_OLLAMA_MODEL", settings.qwen_model),
             ),
-            secrets=(SecretBinding("OPENAI_API_KEY", settings.qwen_api_key_secret_id),),
+            secrets=tuple(
+                binding
+                for binding in (
+                    SecretBinding("OPENAI_API_KEY", settings.qwen_api_key_secret_id),
+                    (
+                        SecretBinding(
+                            "UAR_TASK_API_TOKEN", settings.task_api_token_secret_id
+                        )
+                        if settings.task_api_token_secret_id is not None
+                        else None
+                    ),
+                )
+                if binding is not None
+            ),
             network=_network_destinations(settings),
             operation_options=OperationOptions(
                 settings.agent_operation_timeout_seconds

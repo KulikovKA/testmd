@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 class ConfigurationError(ValueError):
@@ -88,6 +89,23 @@ def _command(environment: Mapping[str, str]) -> tuple[str, ...]:
     return tuple(decoded)
 
 
+def _optional_task_endpoint(environment: Mapping[str, str]) -> str | None:
+    value = environment.get("UAR_TASK_API_BASE_URL", "").strip()
+    if not value:
+        return None
+    parsed = urlparse(value)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ConfigurationError("UAR_TASK_API_BASE_URL must be an HTTP(S) origin")
+    return value.rstrip("/")
+
+
 @dataclass(frozen=True)
 class ApplicationSettings:
     """Explicit non-secret deployment inputs needed to assemble the local PoC."""
@@ -117,6 +135,11 @@ class ApplicationSettings:
     qwen_model: str
     qwen_api_key_secret_id: str
     qwen_api_key: str = field(repr=False)
+    task_api_base_url: str | None = None
+    task_api_token_secret_id: str | None = None
+    task_api_token: str | None = field(default=None, repr=False)
+    task_api_timeout_seconds: float = 10.0
+    task_api_max_response_bytes: int = 65_536
     chat_max_message_characters: int = 16_384
     chat_max_response_characters: int = 16_384
     chat_max_history_messages: int = 100
@@ -146,6 +169,33 @@ class ApplicationSettings:
             or self.chat_max_history_messages < 2
         ):
             raise ConfigurationError("invalid chat limits")
+        if self.task_api_base_url is not None:
+            _optional_task_endpoint({"UAR_TASK_API_BASE_URL": self.task_api_base_url})
+        if (self.task_api_token_secret_id is None) != (self.task_api_token is None):
+            raise ConfigurationError(
+                "Task API token ID and value must be configured together"
+            )
+        if self.task_api_token_secret_id is not None:
+            _identifier(
+                {"UAR_TASK_API_TOKEN_SECRET_ID": self.task_api_token_secret_id},
+                "UAR_TASK_API_TOKEN_SECRET_ID",
+            )
+            if not self.task_api_token or "\x00" in self.task_api_token:
+                raise ConfigurationError("UAR_TASK_API_TOKEN is invalid")
+        if (
+            type(self.task_api_max_response_bytes) is not int
+            or not 1_024 <= self.task_api_max_response_bytes <= 1_048_576
+        ):
+            raise ConfigurationError(
+                "UAR_TASK_API_MAX_RESPONSE_BYTES must be in 1024..1048576"
+            )
+        if (
+            isinstance(self.task_api_timeout_seconds, bool)
+            or not isinstance(self.task_api_timeout_seconds, (int, float))
+            or not math.isfinite(self.task_api_timeout_seconds)
+            or self.task_api_timeout_seconds <= 0
+        ):
+            raise ConfigurationError("UAR_TASK_API_TIMEOUT_SECONDS must be positive")
 
     @classmethod
     def from_environment(
@@ -170,6 +220,12 @@ class ApplicationSettings:
         if storage_root.resolve() == Path(storage_root.resolve().anchor):
             raise ConfigurationError(
                 "UAR_QWEN_SESSION_STORAGE_ROOT must not be a filesystem root"
+            )
+        task_token_secret_id = values.get("UAR_TASK_API_TOKEN_SECRET_ID", "").strip()
+        task_token = values.get("UAR_TASK_API_TOKEN", "")
+        if bool(task_token_secret_id) != bool(task_token):
+            raise ConfigurationError(
+                "Task API token ID and value must be configured together"
             )
         return cls(
             api_host=_required(values, "UAR_API_HOST"),
@@ -211,6 +267,17 @@ class ApplicationSettings:
             qwen_model=_required(values, "UAR_QWEN_MODEL"),
             qwen_api_key_secret_id=_identifier(values, "UAR_QWEN_API_KEY_SECRET_ID"),
             qwen_api_key=_required(values, "UAR_QWEN_API_KEY"),
+            task_api_base_url=_optional_task_endpoint(values),
+            task_api_token_secret_id=task_token_secret_id or None,
+            task_api_token=task_token or None,
+            task_api_timeout_seconds=_positive_float(
+                {"UAR_TASK_API_TIMEOUT_SECONDS": "10", **values},
+                "UAR_TASK_API_TIMEOUT_SECONDS",
+            ),
+            task_api_max_response_bytes=_positive_int(
+                {"UAR_TASK_API_MAX_RESPONSE_BYTES": "65536", **values},
+                "UAR_TASK_API_MAX_RESPONSE_BYTES",
+            ),
             stream_heartbeat_seconds=_positive_float(
                 {"UAR_STREAM_HEARTBEAT_SECONDS": "15", **values},
                 "UAR_STREAM_HEARTBEAT_SECONDS",

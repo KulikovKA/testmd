@@ -191,6 +191,42 @@ def test_configuration_requires_all_mandatory_values(tmp_path: Path) -> None:
         ApplicationSettings.from_environment(environment)
 
 
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"UAR_TASK_API_BASE_URL": "file:///tmp/tasks"}, "UAR_TASK_API_BASE_URL"),
+        (
+            {"UAR_TASK_API_TOKEN_SECRET_ID": "task-token"},
+            "Task API token ID and value",
+        ),
+        (
+            {"UAR_TASK_API_TOKEN": "test-token"},
+            "Task API token ID and value",
+        ),
+        ({"UAR_TASK_API_MAX_RESPONSE_BYTES": "100"}, "UAR_TASK_API_MAX_RESPONSE_BYTES"),
+    ],
+)
+def test_task_tool_deployment_configuration_is_narrow_and_validated(
+    tmp_path: Path, changes: dict[str, str], message: str
+) -> None:
+    environment = {**_environment(tmp_path), **changes}
+    with pytest.raises(ConfigurationError, match=message):
+        ApplicationSettings.from_environment(environment)
+
+
+def test_task_tool_deployment_token_is_kept_as_a_secret_value(tmp_path: Path) -> None:
+    settings = ApplicationSettings.from_environment(
+        {
+            **_environment(tmp_path),
+            "UAR_TASK_API_BASE_URL": "http://host.docker.internal:8001",
+            "UAR_TASK_API_TOKEN_SECRET_ID": "task-token",
+            "UAR_TASK_API_TOKEN": "test-task-token",
+        }
+    )
+    assert settings.task_api_base_url == "http://host.docker.internal:8001"
+    assert "test-task-token" not in repr(settings)
+
+
 def test_composition_selects_docker_at_root_with_injected_interaction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

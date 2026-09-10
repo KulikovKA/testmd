@@ -354,12 +354,27 @@ class AgentLifecycleService:
                 command.skills,
                 command.tools,
             )
+            environment = self._configuration.environment
+            if command.skills:
+                environment = (
+                    *environment,
+                    EnvironmentVariable(
+                        "UAR_AGENT_SKILL_PACKAGES", ",".join(command.skills)
+                    ),
+                )
+            if command.tools:
+                environment = (
+                    *environment,
+                    EnvironmentVariable(
+                        "UAR_AGENT_TOOL_CAPABILITIES", ",".join(command.tools)
+                    ),
+                )
             runtime_request = CreateRuntimeRequest(
                 agent_id,
                 workspace_id,
                 self._configuration.workload,
                 self._configuration.resources,
-                self._configuration.environment,
+                environment,
                 self._configuration.secrets,
                 self._configuration.network,
             )

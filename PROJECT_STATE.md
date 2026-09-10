@@ -1,19 +1,19 @@
 # Состояние проекта
 
-Last updated: 2026-09-09 after completing TASK-011.
+Last updated: 2026-09-10 after completing TASK-013.
 
 ## Текущий статус
 
-- TASK-000 through TASK-011 are DONE.
-- No task is ACTIVE. TASK-012 remains TODO; it requires an explicit user instruction.
+- TASK-000 through TASK-013 are DONE.
+- TASK-013 packages the `task-decomposition@1.0.0` Skill, delivers it per Agent, and verifies its restricted confirmed-Task flow with local Docker, Ollama and Qwen Code.
 - TASK-004 реализует локальный `DockerRuntime` для runtime-neutral порта `AgentRuntime`.
 - TASK-005 добавляет ограниченный исполняемый probe Qwen Code/Ollama, не добавляя conversation/session port в application layer.
 - TASK-006 реализует persistent Qwen session adapter за отдельным runtime-neutral портом `AgentInteraction`.
 - TASK-007 добавляет universal Docker agent image и проверенный native Qwen launch/resume через `DockerRuntime`.
 - TASK-008 добавляет HTTP foundation и явный composition root без endpoints жизненного цикла или чата.
 - TASK-009 добавляет Agent lifecycle use cases и HTTP create/inspect/start/stop/delete API без chat behavior.
-- TASK-010 implements JSON chat/history. TASK-011 adds turn-bound SSE with committed response content.
-- JSON chat and SSE event delivery are implemented. Token streaming, restricted Task Tool and UI are not implemented.
+- TASK-010 implements JSON chat/history. TASK-011 adds turn-bound SSE with committed response content. TASK-012 adds a restricted Task REST MCP adapter.
+- JSON chat, SSE event delivery and the restricted Task Tool are implemented. Token streaming and UI are not implemented.
 
 ## Работающая функциональность
 
@@ -98,6 +98,32 @@ Verified TASK-011 behavior:
 - ASGI disconnect, network failure and slow-consumer timeout detach delivery without cancelling inference or releasing BUSY. Other Agents continue independently.
 - There is no global/Agent-wide subscription or attach-by-ID API. Foreign turn/session request fields are rejected. Last-Event-ID is rejected before admission; clients inspect history after losing a response.
 - The real TCP/Uvicorn/Docker/Ollama test received started while a second HTTP request still observed BUSY and empty history, then keep-alive and committed content. A JSON follow-up recalled the SSE turn's random codeword.
+
+Проверено по TASK-012:
+
+- `task_rest_mcp_server.mjs` is an adapter-owned MCP stdio service with exactly
+  `get_task`, `create_task`, `create_subtask` and `update_task`. Its routes,
+  methods, schemas and response limits are fixed; it accepts no arbitrary URL,
+  method, headers or body.
+- Deployment configuration supplies the Task API origin, timeout, response-size
+  bound and optional secret. The optional token is injected only through runtime
+  environment, is absent from generated MCP/Qwen configuration and is redacted
+  from adapter artifacts and public chat values.
+- Generic Agent `tools` capability IDs are transferred to the isolated runtime.
+  `DockerAgentQwenRunner` maps only the recognized Task IDs to Qwen MCP tool
+  names. A Skill cannot grant an absent capability.
+- Qwen `--bare` receives an explicit adapter-owned `--mcp-config`, one allowed
+  MCP server and only selected `task-rest__<operation>` tool names. Built-in
+  file, shell, notebook and goal tools remain excluded.
+- The deterministic integration test ran MCP discovery and every operation in
+  the pinned Qwen image against an isolated HTTP Task fixture. It also covered
+  capability denial, input/path/method/header injection, oversized responses,
+  not-found, authentication, timeout and service failures.
+- An opt-in live Docker/Ollama test using `qwen3:0.6b` confirmed that Qwen Code
+  discovered and invoked `create_task` against a real mock Task service. The
+  all-operation proof remains deterministic at the MCP protocol boundary.
+- Domain/application and the independent `mock_task_service` remain free of
+  Task schema imports and decomposition logic.
 
 ## Текущая архитектура
 
@@ -229,6 +255,12 @@ $env:QWEN_OLLAMA_MODEL='qwen3:1.7b'
 $env:RUN_QWEN_OLLAMA_INTEGRATION='1'
 .\.venv\Scripts\python.exe -m pytest tests/integration/test_agent_streaming.py -q
 
+# TASK-012 restricted Task MCP protocol and live Qwen discovery/invocation
+.\.venv\Scripts\python.exe -m pytest tests/unit/test_task_rest_mcp.py tests/unit/test_qwen_session.py tests/unit/test_docker_agent_qwen.py -q
+$env:RUN_QWEN_OLLAMA_INTEGRATION='1'
+$env:QWEN_OLLAMA_MODEL='qwen3:0.6b'
+.\.venv\Scripts\python.exe -m pytest tests/integration/test_task_rest_tool.py -q
+
 # Полный quality gate
 .\.venv\Scripts\python.exe -m pytest
 .\.venv\Scripts\python.exe -m ruff format --check .
@@ -244,6 +276,29 @@ git diff --check -- .
 ```
 
 ## Последняя валидация
+
+Date: 2026-09-09. Result: PASS for TASK-012.
+
+- Focused Task MCP/Qwen/lifecycle/configuration checks: 81 passed, 1 opt-in
+  live test skipped in the default run.
+- Deterministic MCP protocol integration ran in the pinned Qwen Code image:
+  all four allowed operations passed against an isolated Task HTTP fixture.
+- Separately enabled live Docker/Ollama check: 1 passed in 16.10 s using
+  `qwen3:0.6b`; Qwen Code discovered and invoked the restricted `create_task`
+  MCP tool against a real mock Task service.
+- Full pytest: 334 passed, 5 opt-in live tests skipped.
+- Ruff format --check: PASS, 95 files already formatted. Ruff lint: PASS.
+- mypy src tests: PASS, 70 source files.
+- Managed Docker container and volume inventories: empty after validation.
+- Scoped diff compared against the pre-task snapshot: Task MCP adapter,
+  deployment configuration, capability plumbing, tests and documentation only;
+  existing unrelated working-tree changes were preserved.
+- git diff --check: PASS. No dependencies or unrelated infrastructure added.
+- Existing Starlette/HTTPX/AnyIO deprecation warnings remain; no test failures.
+- All eight TASK-012 acceptance criteria were verified. Evidence mapping:
+  [restricted-task-rest-tool.md](docs/restricted-task-rest-tool.md).
+
+## Архив валидации TASK-011
 
 Date: 2026-09-09. Result: PASS for TASK-011.
 
@@ -265,6 +320,19 @@ Date: 2026-09-09. Result: PASS for TASK-011.
 - Existing Starlette/HTTPX/AnyIO deprecation warnings remain; no test failures.
 - All eight acceptance criteria verified with the explicit buffered-content
   limitation. Evidence mapping: [agent-streaming-api.md](docs/agent-streaming-api.md).
+
+## TASK-012 changed files
+
+- `.env.example`, `AGENTS.md`, `TASKS.md`, `PROJECT_STATE.md`, `pyproject.toml`
+- `docs/architecture.md`, `docs/restricted-task-rest-tool.md`,
+  `docs/decisions/0008-restricted-task-mcp-boundary.md`
+- `src/universal_agent_runtime/configuration.py`, `composition.py`,
+  `application/agent_lifecycle.py`
+- `src/universal_agent_runtime/adapters/qwen_session.py`,
+  `docker_agent_qwen.py`, `task_rest_mcp_server.mjs`
+- `tests/api/test_orchestrator_foundation.py`,
+  `tests/unit/test_agent_lifecycle.py`, `test_qwen_session.py`,
+  `test_task_rest_mcp.py`, `tests/integration/test_task_rest_tool.py`
 
 ## TASK-011 changed files
 
@@ -309,12 +377,26 @@ changes that were preserved without modification:
 - `tests/integration/test_agent_chat_api.py`,
   `tests/runtime_support/fake_interaction.py`
 
+## TASK-013 validation
+
+- Package manifest parsing, capability intersection, workspace delivery and
+  prompt composition: PASS through focused unit tests.
+- Full pytest: 341 passed, 5 opt-in live tests skipped; two existing TestClient
+  deprecation warnings only.
+- Ruff lint and mypy `src tests`: PASS. `git diff --check`: PASS.
+- Opt-in `tests/integration/test_task_rest_tool.py` with Docker, local Ollama,
+  `qwen3:0.6b`, selected `task-decomposition`, and restricted MCP: PASS. The
+  explicit confirmed proposal created only the allowed Task record.
+- Scoped diff is limited to Skill packaging, generic package capability
+  transport, Qwen adapter delivery, its tests, and documentation. Earlier
+  TASK-012 working-tree changes remain preserved.
+
 ## Рекомендуемая следующая задача
 
-TASK-012 — Restricted Task REST Tool.
+TASK-014 — Локальный сквозной тест Docker.
 
-TASK-012 remains TODO. Do not start without an explicit user instruction.
+TASK-014 remains TODO. Do not start without an explicit user instruction.
 
-Recommended model: GPT-5.6 Terra.
+Recommended model: GPT-5.6 Sol.
 
 Recommended reasoning level: High.

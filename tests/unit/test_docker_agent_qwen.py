@@ -5,7 +5,7 @@ import json
 import tarfile
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 from uuid import uuid4
 
 import pytest
@@ -16,6 +16,7 @@ from universal_agent_runtime.adapters.qwen_session import (
     QwenInvocation,
     QwenRunnerFailure,
 )
+from universal_agent_runtime.adapters.skill_packages import SkillPackageCatalog
 
 
 def _runner(root: Path) -> DockerAgentQwenRunner:
@@ -23,6 +24,7 @@ def _runner(root: Path) -> DockerAgentQwenRunner:
     runner._config = config(root / "sessions")
     runner._workspace_target = "/workspace"
     runner._uid, runner._gid = 10001, 10001
+    runner._skill_catalog = SkillPackageCatalog.builtins()
     return runner
 
 
@@ -79,6 +81,9 @@ def test_existing_agent_container_is_selected_and_home_is_non_root(
 
     class Container:
         status = "running"
+        attrs: ClassVar[dict[str, dict[str, list[str]]]] = {
+            "Config": {"Env": ["UAR_AGENT_SKILL_PACKAGES=task-decomposition"]}
+        }
 
         def exec_run(self, command: list[str], **kwargs: Any) -> Any:
             commands.append(command)
@@ -104,7 +109,15 @@ def test_existing_agent_container_is_selected_and_home_is_non_root(
 
         def get_archive(self, path: str) -> tuple[list[bytes], dict[str, Any]]:
             assert path == "/workspace/.qwen-home"
-            return [archive_bytes[-1]], {}
+            result = io.BytesIO()
+            with (
+                tarfile.open(fileobj=io.BytesIO(archive_bytes[-1])) as source,
+                tarfile.open(fileobj=result, mode="w") as target,
+            ):
+                for member in source:
+                    if member.name.startswith(".qwen-home"):
+                        target.addfile(member, source.extractfile(member))
+            return [result.getvalue()], {}
 
     def select(**kwargs: Any) -> list[Container]:
         selection.append(kwargs)
@@ -120,7 +133,10 @@ def test_existing_agent_container_is_selected_and_home_is_non_root(
     with tarfile.open(fileobj=io.BytesIO(archive_bytes[0])) as archive:
         assert archive.getmembers()[0].name.rstrip("/.") == ".qwen-home"
         assert all(member.uid == member.gid == 10001 for member in archive)
+        assert ".agent/skills/task-decomposition/SKILL.md" in archive.getnames()
     assert commands[-1][0] == "qwen"
+    prompt = commands[-1][commands[-1].index("-p") + 1]
+    assert "Selected Skill: task-decomposition@1.0.0." in prompt
 
 
 @pytest.mark.parametrize(

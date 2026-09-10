@@ -188,7 +188,9 @@
 
     |-- orchestrator-api-foundation.md
 
-    |-- agent-lifecycle-api.md
+  |-- agent-lifecycle-api.md
+
+    |-- restricted-task-rest-tool.md
 
     `-- decisions/
 
@@ -198,9 +200,11 @@
 
       |-- 0003-external-inference-boundary.md
 
-        |-- 0004-runtime-retry-and-recovery-ownership.md
+      |-- 0004-runtime-retry-and-recovery-ownership.md
 
-        `-- 0005-qwen-session-persistence.md
+      `-- 0005-qwen-session-persistence.md
+
+        `-- 0008-restricted-task-mcp-boundary.md
 
 ```
 
@@ -234,6 +238,17 @@ TASK-009 adds the runtime-neutral `AgentLifecycleService`, an explicit
 `AgentRepository` port with a process-local adapter, and HTTP create/inspect/
 start/stop/delete routes. TASK-010 adds message/history; TASK-011 adds turn-bound SSE with committed response content.
 
+TASK-012 adds an adapter-owned MCP stdio bridge at
+`adapters/task_rest_mcp_server.mjs`. It exposes only fixed Task REST operations
+selected by Agent `tools` capabilities. Deployment endpoint and optional
+credential remain outside model arguments; Task schemas and service behavior do
+not enter domain or application code.
+
+TASK-013 adds strict versioned Skill packages under `agent_assets/`. The Qwen
+adapter delivers each selected package only to the owning Agent workspace and
+intersects its declared Tool capability IDs with the Agent configuration.
+Skills are instructions only; Tool adapters enforce authorization.
+
 TASK-010 adds `application/agent_chat.py`, `domain/message.py`, and
 `adapters/docker_agent_qwen.py`. HTTP turns execute in the existing Agent
 container through `AgentInteraction`. The repository owns bounded public
@@ -259,6 +274,17 @@ protocol decision: ADR-0007. Focused commands:
 .\.venv\Scripts\python.exe -m pytest tests/api/test_agent_streaming.py tests/unit/test_agent_chat.py tests/api/test_agent_chat_api.py -q
 $env:RUN_QWEN_OLLAMA_INTEGRATION='1'
 .\.venv\Scripts\python.exe -m pytest tests/integration/test_agent_streaming.py -q
+```
+
+TASK-012 adds a restricted Task REST MCP bridge. It is validated through the
+pinned Qwen image and an isolated mock Task API; the live Qwen invocation is
+opt-in:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/unit/test_task_rest_mcp.py tests/unit/test_qwen_session.py tests/unit/test_docker_agent_qwen.py -q
+$env:RUN_QWEN_OLLAMA_INTEGRATION='1'
+$env:QWEN_OLLAMA_MODEL='qwen3:0.6b'
+.\.venv\Scripts\python.exe -m pytest tests/integration/test_task_rest_tool.py -q
 ```
 
 ```text

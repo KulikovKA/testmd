@@ -2,11 +2,13 @@
 
 import io
 import tarfile
-from pathlib import PurePosixPath
+from dataclasses import replace
+from pathlib import Path, PurePosixPath
 
 from docker.errors import DockerException
 
 from universal_agent_runtime.adapters.qwen_session import (
+    TASK_TOOL_OPERATIONS,
     DockerQwenCommandRunner,
     QwenExecution,
     QwenInvocation,
@@ -17,6 +19,10 @@ from universal_agent_runtime.adapters.qwen_session import (
 )
 from universal_agent_runtime.adapters.qwen_session import (
     QwenRunnerErrorCode as Code,
+)
+from universal_agent_runtime.adapters.skill_packages import (
+    SkillPackage,
+    SkillPackageCatalog,
 )
 from universal_agent_runtime.domain.identifiers import AgentId
 
@@ -29,13 +35,21 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
     the next resume. Business workspace files are never replaced.
     """
 
-    def __init__(self, config: QwenSessionConfig, *, workspace: str, user: str) -> None:
+    def __init__(
+        self,
+        config: QwenSessionConfig,
+        *,
+        workspace: str,
+        user: str,
+        skill_catalog: SkillPackageCatalog | None = None,
+    ) -> None:
         super().__init__(config)
         self._workspace_target = workspace
         parts = user.split(":")
         if len(parts) != 2 or not all(part.isdigit() for part in parts):
             raise ValueError("Docker Qwen transport requires numeric uid:gid")
         self._uid, self._gid = map(int, parts)
+        self._skill_catalog = skill_catalog or SkillPackageCatalog.builtins()
 
     def run(self, invocation: QwenInvocation) -> QwenExecution:
         agent_id = AgentId(invocation.workspace.parent.name)
@@ -54,6 +68,15 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
             if len(containers) != 1 or containers[0].status != "running":
                 raise QwenRunnerFailure(Code.OPERATION_FAILED)
             container = containers[0]
+            task_operations = self._task_operations(container)
+            selected_skills = self._selected_skills(container, task_operations)
+            invocation = replace(
+                invocation,
+                task_operations=task_operations,
+                skill_instructions=tuple(
+                    skill.prompt_fragment(granted) for skill, granted in selected_skills
+                ),
+            )
             # Fixed adapter-owned path and argv; no shell or user-controlled command.
             cleared = container.exec_run(
                 [
@@ -67,16 +90,51 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
                 raise QwenRunnerFailure(Code.OPERATION_FAILED)
             archive = io.BytesIO()
             with tarfile.open(fileobj=archive, mode="w") as bundle:
-                for path in [
-                    invocation.qwen_home,
-                    *sorted(invocation.qwen_home.rglob("*")),
-                ]:
+                paths: list[tuple[Path, str]] = [
+                    (invocation.qwen_home, ".qwen-home"),
+                    *(
+                        (
+                            path,
+                            f".qwen-home/{path.relative_to(invocation.qwen_home).as_posix()}",
+                        )
+                        for path in sorted(invocation.qwen_home.rglob("*"))
+                    ),
+                ]
+                tool_directory = invocation.workspace / ".uar-tools"
+                if tool_directory.is_dir():
+                    paths.extend(
+                        [
+                            (tool_directory, ".uar-tools"),
+                            *(
+                                (
+                                    path,
+                                    path.relative_to(invocation.workspace).as_posix(),
+                                )
+                                for path in sorted(tool_directory.rglob("*"))
+                            ),
+                        ]
+                    )
+                for skill, _ in selected_skills:
+                    skill_root = skill.source_directory
+                    paths.extend(
+                        [
+                            (skill_root, f".agent/skills/{skill.identifier}"),
+                            *(
+                                (
+                                    path,
+                                    (
+                                        f".agent/skills/{skill.identifier}/"
+                                        f"{path.relative_to(skill_root).as_posix()}"
+                                    ),
+                                )
+                                for path in sorted(skill_root.rglob("*"))
+                            ),
+                        ]
+                    )
+                for path, archive_name in paths:
                     if path.is_symlink():
                         raise QwenRunnerFailure(Code.PROTOCOL_FAILURE)
-                    relative = path.relative_to(invocation.qwen_home).as_posix()
-                    info = bundle.gettarinfo(
-                        str(path), arcname=f".qwen-home/{relative}"
-                    )
+                    info = bundle.gettarinfo(str(path), arcname=archive_name)
                     info.uid, info.gid = self._uid, self._gid
                     info.uname = info.gname = ""
                     if path.is_file():
@@ -94,6 +152,8 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
                     "HOME": home,
                     "OLLAMA_API_KEY": self._config.api_key,
                     "OPENAI_API_KEY": self._config.api_key,
+                    "UAR_AGENT_TOOL_CAPABILITIES": ",".join(invocation.task_operations),
+                    **self._task_environment(),
                 },
             )
             if not isinstance(outcome.output, bytes):
@@ -111,6 +171,59 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
             raise
         except (DockerException, OSError, ValueError, tarfile.TarError):
             raise QwenRunnerFailure(Code.OPERATION_FAILED) from None
+
+    def _environment_values(self, container: object) -> dict[str, str]:
+        environment = getattr(container, "attrs", {}).get("Config", {}).get("Env", [])
+        if not isinstance(environment, list):
+            raise QwenRunnerFailure(Code.PROTOCOL_FAILURE)
+        return {
+            item.partition("=")[0]: item.partition("=")[2]
+            for item in environment
+            if isinstance(item, str) and "=" in item
+        }
+
+    def _task_operations(self, container: object) -> tuple[str, ...]:
+        if self._config.task_api_base_url is None:
+            return ()
+        values = self._environment_values(container)
+        return tuple(
+            operation
+            for operation in TASK_TOOL_OPERATIONS
+            if operation in values.get("UAR_AGENT_TOOL_CAPABILITIES", "").split(",")
+        )
+
+    def _selected_skills(
+        self, container: object, task_operations: tuple[str, ...] | None = None
+    ) -> tuple[tuple[SkillPackage, tuple[str, ...]], ...]:
+        selected = tuple(
+            value
+            for value in self._environment_values(container)
+            .get("UAR_AGENT_SKILL_PACKAGES", "")
+            .split(",")
+            if value
+        )
+        return self._skill_catalog.resolve(
+            selected,
+            self._task_operations(container)
+            if task_operations is None
+            else task_operations,
+        )
+
+    def _task_environment(self) -> dict[str, str]:
+        if self._config.task_api_base_url is None:
+            return {}
+        result = {
+            "UAR_TASK_API_BASE_URL": self._config.task_api_base_url,
+            "UAR_TASK_API_TIMEOUT_MS": str(
+                round(self._config.task_api_timeout_seconds * 1000)
+            ),
+            "UAR_TASK_API_MAX_RESPONSE_BYTES": str(
+                self._config.task_api_max_response_bytes
+            ),
+        }
+        if self._config.task_api_token is not None:
+            result["UAR_TASK_API_TOKEN"] = self._config.task_api_token
+        return result
 
     def _receive(self, invocation: QwenInvocation, chunks: object) -> None:
         # Read a bounded archive and reject links, traversal, and special files.

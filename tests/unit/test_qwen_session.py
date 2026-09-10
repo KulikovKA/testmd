@@ -3,11 +3,13 @@ import json
 from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any, TypeVar
+from uuid import uuid4
 
 import pytest
 
 from universal_agent_runtime.adapters.qwen_session import (
     QWEN_IMAGE,
+    DockerQwenCommandRunner,
     QwenCommandRunner,
     QwenExecution,
     QwenInvocation,
@@ -401,6 +403,74 @@ def test_credential_value_is_never_persisted(tmp_path: Path) -> None:
     )
     assert secret not in persisted
     run(adapter.close())
+
+
+def test_task_mcp_configuration_uses_only_deployment_values(tmp_path: Path) -> None:
+    reference = session()
+    secret = "TASK012_TEST_TOKEN_MUST_NOT_PERSIST"
+    adapter = QwenSessionAdapter(
+        config(
+            tmp_path / "sessions",
+            task_api_base_url="http://host.docker.internal:8001",
+            task_api_token=secret,
+        ),
+        runner=FakeQwenRunner(),
+    )
+    run(adapter.create_session(reference))
+
+    directory = tmp_path / "sessions" / reference.agent_id.value
+    settings = json.loads((directory / "qwen-home" / "settings.json").read_text())
+    server = settings["mcpServers"]["task-rest"]
+    assert settings["mcp"] == {"allowed": ["task-rest"]}
+    assert server["includeTools"] == [
+        "get_task",
+        "create_task",
+        "create_subtask",
+        "update_task",
+    ]
+    assert server["args"] == ["/workspace/.uar-tools/task_rest_mcp_server.mjs"]
+    assert (
+        directory / "workspace" / ".uar-tools" / "task_rest_mcp_server.mjs"
+    ).is_file()
+    persisted = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in directory.rglob("*")
+        if path.is_file()
+    )
+    assert secret not in persisted
+    run(adapter.close())
+
+
+def test_qwen_command_allows_only_enabled_task_mcp_tools(tmp_path: Path) -> None:
+    adapter_config = config(
+        tmp_path / "sessions", task_api_base_url="http://host.docker.internal:8001"
+    )
+    runner = object.__new__(DockerQwenCommandRunner)
+    runner._config = adapter_config
+    invocation = QwenInvocation(
+        tmp_path / "home",
+        tmp_path / "workspace",
+        uuid4(),
+        "current message",
+        False,
+        ("get_task", "update_task"),
+    )
+
+    command = runner.command(invocation)
+    assert command[command.index("--max-tool-calls") + 1] == "4"
+    assert (
+        command[command.index("--mcp-config") + 1] == "/root/.qwen/task-mcp-config.json"
+    )
+    assert command[command.index("--allowed-mcp-server-names") + 1] == "task-rest"
+    allowed_index = command.index("--allowed-tools")
+    assert command[allowed_index + 1 : allowed_index + 3] == [
+        "task-rest__get_task",
+        "task-rest__update_task",
+    ]
+    assert "create_task" not in command
+    assert "create_subtask" not in command
+    system_prompt = command[command.index("--system-prompt") + 1]
+    assert "copy the returned id, title, parent_id, and subtask_ids" in system_prompt
 
 
 @pytest.mark.parametrize(

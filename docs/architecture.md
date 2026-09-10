@@ -1,5 +1,5 @@
 # Архитектура Universal Agent Runtime
-Status: TASK-000 establishes the architecture; TASK-001 provides the Python scaffold; TASK-002 defines runtime control; TASK-004 implements DockerRuntime; TASK-006 implements persistent interaction; TASK-007 supplies the universal agent image; TASK-008 establishes HTTP composition; TASK-009 provides lifecycle APIs; TASK-010 implements JSON chat and bounded public history; TASK-011 adds turn-bound SSE with committed response content.
+Status: TASK-000 establishes the architecture; TASK-001 provides the Python scaffold; TASK-002 defines runtime control; TASK-004 implements DockerRuntime; TASK-006 implements persistent interaction; TASK-007 supplies the universal agent image; TASK-008 establishes HTTP composition; TASK-009 provides lifecycle APIs; TASK-010 implements JSON chat and bounded public history; TASK-011 adds turn-bound SSE with committed response content; TASK-012 adds a restricted Task REST MCP adapter.
 
 ## Назначение и область
 Система создаёт и управляет изолированными экземплярами CLI-агентов через нейтральный к runtime Agent Orchestrator. Агент сохраняет состояние диалога, получает настроенные Skills и узко ограниченные Tools и использует внешний inference-сервис. Docker является локальным backend исполнения; Kata Containers — более поздний backend для корпоративной среды.
@@ -109,6 +109,15 @@ Configuration Agent валидируется до provisioning и разделя
 Ни endpoint, ни port, ни model, ни credential, ни корпоративное значение не являются обязательными захардкоженными данными. Безопасные локальные mock defaults могут задаваться явно. Значения secrets никогда не хранятся в metadata Agent и не возвращаются через API.
 
 ### Skills
+
+`task-decomposition@1.0.0` is a strict built-in `skill.json` and `SKILL.md`
+package. The Qwen adapter delivers each selected package only to its owning
+Agent workspace and adds a bounded package reference plus effective
+capabilities to the Qwen prompt. The application and runtime transport selected package IDs without
+task-decomposition branching. A Skill declares Tool capabilities but never
+grants them: effective capabilities are the intersection with the Agent's
+configured Tools, and the Tool adapter independently enforces that set. The
+detailed package contract is in `docs/skill-packaging.md` and ADR 0009.
 Skills — версионируемые пакеты поведения на стороне агента. Первый Skill, `task-decomposition`, предоставляет доменные инструкции и рекомендации по использованию tools. Runtime только доставляет выбранные Skills; он не содержит ветвлений для декомпозиции задач. Контракт упаковки и discovery окончательно определяется в TASK-013 после того, как станет известна интеграция Qwen.
 
 ### Tools
@@ -129,7 +138,7 @@ Tools — явные capabilities с типизированными операц
 | Qwen adapter/launcher | `QwenSessionAdapter` владеет persistent interaction; `agent_image` предоставляет переносимый CLI launcher execution unit | Qwen Code не является моделью Ollama; image не определяет HTTP API или Tool semantics |
 | Ollama | Размещает настроенную Qwen LLM вне agent runtime | Существующий сервис, доступный по сети |
 | Skill loader | Передаёт выбранные behavior packages одному агенту | Не может предоставлять незаявленные tools |
-| Tool adapter | Предоставляет Agent узкие одобренные операции | Не является произвольным REST proxy |
+| Tool adapter | Предоставляет Agent узкие одобренные операции | TASK-012 uses an adapter-owned MCP server for fixed Task REST operations; it is not an arbitrary REST proxy |
 | Workspace/session storage | Изолирует per-agent manifest, project history, native Qwen transcript и workspace | Реализовано adapter-local в TASK-006; create/delete lifecycle wiring реализовано в TASK-009 |
 
 ## Модель жизненного цикла
@@ -251,7 +260,7 @@ TASK-006 реализует `AgentInteraction` и combined native/project-owned 
 TASK-007 добавляет закреплённый universal agent image и проверяет native Qwen turn/resume через `DockerRuntime`; его нейтральный launcher contract и local bridge limitation описаны в [agent-image.md](agent-image.md).
 TASK-008 добавляет [HTTP foundation](orchestrator-api-foundation.md) с явным composition root, TestClient/OpenAPI validation и только `/healthz`/`/readyz`.
 TASK-009 добавляет [Agent lifecycle API](agent-lifecycle-api.md), explicit in-memory metadata port/adapter и проверенный Docker lifecycle через universal image.
-TASK-010 implements [non-streaming chat/history](agent-chat-api.md) through `AgentChatService` and `AgentInteraction`, including `READY -> BUSY -> READY`, per-Agent rejection, bounded retrieval and explicit recovery. TASK-011 adds [turn-bound SSE](agent-streaming-api.md) through the same `AgentChatService.begin` and completion logic. Public turn IDs are allocated at admission; disconnect detaches delivery without releasing BUSY. Per-send timeout and on-demand keep-alive avoid an event queue. Remaining work:
+TASK-010 implements [non-streaming chat/history](agent-chat-api.md) through `AgentChatService` and `AgentInteraction`, including `READY -> BUSY -> READY`, per-Agent rejection, bounded retrieval and explicit recovery. TASK-011 adds [turn-bound SSE](agent-streaming-api.md) through the same `AgentChatService.begin` and completion logic. Public turn IDs are allocated at admission; disconnect detaches delivery without releasing BUSY. Per-send timeout and on-demand keep-alive avoid an event queue. TASK-012 adds [restricted Task REST MCP](restricted-task-rest-tool.md): deployment configuration chooses the origin and optional secret, generic Agent tools select the exact exposed operations, and Task semantics remain in the adapter. Remaining work:
 
 - Partial-token delivery and remote proxy behavior remain NOT VERIFIED; TASK-011 intentionally exposes committed response content, not token deltas;
 - формат упаковки Skill и schema ограниченного Tool (TASK-012/TASK-013);
@@ -267,3 +276,4 @@ TASK-010 implements [non-streaming chat/history](agent-chat-api.md) through `Age
 - [ADR-0006: Public chat commit and recovery ownership](decisions/0006-public-chat-commit-and-recovery.md)
 
 - [ADR-0007: Turn-bound committed SSE](decisions/0007-turn-bound-committed-sse.md)
+- [ADR-0008: Restricted Task MCP boundary](decisions/0008-restricted-task-mcp-boundary.md)
