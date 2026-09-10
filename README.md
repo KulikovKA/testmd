@@ -1,7 +1,7 @@
 # Universal Agent Runtime — серверный запуск
 
 Эта ветка содержит только файлы, нужные для запуска UI, Orchestrator и
-изолированных Agent в Docker. Qwen Code CLI работает в `agent_image` и
+изолированных Agent через Docker daemon. Qwen Code CLI работает в `agent_image` и
 обращается к внешнему Ollama `http://10.21.171.2:11434`; локальная установка
 Ollama не требуется. Модель: `qwen-3.8-multimodal:latest`.
 
@@ -11,6 +11,16 @@ Ollama не требуется. Модель: `qwen-3.8-multimodal:latest`.
 Сервисный пользователь должен иметь доступ к Docker. `task-decomposition` и
 ограниченный Task MCP Tool уже включены, но Sfera Task API не активирован, пока
 не задан `UAR_TASK_API_BASE_URL`.
+
+## Режим runtime
+
+`UAR_RUNTIME_DRIVER=docker` запускает Agent как обычный Docker container и
+сохраняет исходное поведение.
+
+`UAR_RUNTIME_DRIVER=kata` использует Docker как control plane и передаёт
+`runtime="kata"` при создании контейнера. Один Agent соответствует одной Kata
+microVM, которая существует всё время жизни Agent: от create до delete и не
+пересоздаётся между сообщениями.
 
 ## Установка и конфигурация
 
@@ -43,6 +53,15 @@ curl --fail http://127.0.0.1:8080/healthz
 curl --fail http://127.0.0.1:8080/readyz
 curl --fail http://127.0.0.1:8090/
 ```
+
+Для режима Kata найдите контейнер Agent по служебной label и проверьте runtime:
+
+```bash
+docker ps -a --filter label=io.universal-agent-runtime.managed=true
+docker inspect --format '{{.HostConfig.Runtime}}' <container_id>
+```
+
+Ожидаемое значение при `UAR_RUNTIME_DRIVER=kata`: `kata`.
 
 Остановка:
 

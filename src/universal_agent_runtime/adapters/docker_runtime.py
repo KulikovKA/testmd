@@ -1,6 +1,7 @@
 """Docker implementation of the runtime-neutral AgentRuntime lifecycle port."""
 
 import asyncio
+import re
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -41,6 +42,7 @@ class DockerWorkload:
     healthcheck: Mapping[str, Any] | None = None
     network_mode: str = "none"
     network_destinations: tuple[NetworkDestination, ...] = ()
+    container_runtime: str | None = None
 
     def __post_init__(self) -> None:
         if not self.image or not self.command or not self.user:
@@ -60,6 +62,12 @@ class DockerWorkload:
             raise ValueError("network_mode none cannot declare destinations")
         if self.network_mode == "bridge" and not self.network_destinations:
             raise ValueError("bridge mode requires declared destinations")
+        if self.container_runtime is not None and (
+            not isinstance(self.container_runtime, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", self.container_runtime)
+            is None
+        ):
+            raise ValueError("container_runtime must be a valid Docker runtime name")
 
 
 @dataclass
@@ -373,6 +381,11 @@ class DockerRuntime:
             self._records[request.agent_id] = record
             self._references[handle.reference] = record
             self._workspaces[request.workspace_id] = request.agent_id
+            runtime_arguments = (
+                {"runtime": workload.container_runtime}
+                if workload.container_runtime is not None
+                else {}
+            )
             try:
                 await self._docker_call(
                     Op.CREATE,
@@ -418,6 +431,7 @@ class DockerRuntime:
                     tty=False,
                     privileged=False,
                     auto_remove=False,
+                    **runtime_arguments,
                     handle=handle,
                 )
                 record.container_exists = True

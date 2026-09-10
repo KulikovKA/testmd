@@ -19,6 +19,7 @@ class RuntimeDriver(str, Enum):
     """Runtime drivers currently selectable by the composition root."""
 
     DOCKER = "docker"
+    KATA = "kata"
 
 
 def _required(environment: Mapping[str, str], name: str) -> str:
@@ -207,9 +208,13 @@ class ApplicationSettings:
         cls, environment: Mapping[str, str] | None = None
     ) -> "ApplicationSettings":
         values = os.environ if environment is None else environment
-        driver = _required(values, "UAR_RUNTIME_DRIVER").lower()
-        if driver != RuntimeDriver.DOCKER.value:
-            raise ConfigurationError("UAR_RUNTIME_DRIVER must be docker")
+        driver_name = _required(values, "UAR_RUNTIME_DRIVER").lower()
+        try:
+            driver = RuntimeDriver(driver_name)
+        except ValueError:
+            raise ConfigurationError(
+                "UAR_RUNTIME_DRIVER must be docker or kata"
+            ) from None
         network_mode = _required(values, "UAR_DOCKER_NETWORK_MODE").lower()
         if network_mode not in {"none", "bridge"}:
             raise ConfigurationError("UAR_DOCKER_NETWORK_MODE must be none or bridge")
@@ -235,7 +240,7 @@ class ApplicationSettings:
         return cls(
             api_host=_required(values, "UAR_API_HOST"),
             api_port=_port(values, "UAR_API_PORT"),
-            runtime_driver=RuntimeDriver(driver),
+            runtime_driver=driver,
             docker_workload_key=_required(values, "UAR_DOCKER_WORKLOAD_KEY"),
             docker_image=_required(values, "UAR_DOCKER_WORKLOAD_IMAGE"),
             docker_command=_command(values),

@@ -127,7 +127,7 @@ def _network_destinations(
 
 
 def _compose_runtime(settings: ApplicationSettings) -> AgentRuntime:
-    if settings.runtime_driver is not RuntimeDriver.DOCKER:
+    if settings.runtime_driver not in {RuntimeDriver.DOCKER, RuntimeDriver.KATA}:
         raise ValueError("unsupported runtime driver")
     destinations = _network_destinations(settings)
     healthcheck = {
@@ -147,6 +147,9 @@ def _compose_runtime(settings: ApplicationSettings) -> AgentRuntime:
         healthcheck=healthcheck,
         network_mode=settings.docker_network_mode,
         network_destinations=destinations,
+        container_runtime=(
+            "kata" if settings.runtime_driver is RuntimeDriver.KATA else None
+        ),
     )
 
     def resolve_secret(secret_id: str) -> str:
