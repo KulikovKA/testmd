@@ -1,0 +1,2 @@
+*.sh text eol=lf
+agent_image/agent-runtime text eol=lf

@@ -1,4 +1,4 @@
-"""Execution-unit lifecycle port. See docs/runtime-contract.md for semantics."""
+"""Порт жизненного цикла runtime-единицы исполнения."""
 
 from typing import Protocol
 

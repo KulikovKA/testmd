@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "universal-agent-runtime"
 version = "0.1.0"
-description = "Universal Agent Runtime R&D proof-of-concept scaffold."
+description = "Universal Agent Runtime server deployment."
 requires-python = ">=3.11"
 dependencies = [
     "docker==7.2.0",
@@ -13,30 +13,10 @@ dependencies = [
     "uvicorn==0.52.4",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "httpx==0.28.1",
-    "mypy==1.20.2",
-    "pytest==8.4.2",
-    "ruff==0.16.6",
-    "types-docker==7.2.0.20260827",
-]
-
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["universal_agent_runtime*"]
 
 [tool.setuptools.package-data]
 "universal_agent_runtime.adapters" = ["*.mjs"]
 "universal_agent_runtime.agent_assets" = ["task-decomposition/*.json", "task-decomposition/*.md"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-
-[tool.ruff]
-target-version = "py311"
-extend-exclude = [".venv"]
-
-[tool.mypy]
-python_version = "3.11"
-strict = true
-files = ["src"]
