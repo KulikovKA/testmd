@@ -132,7 +132,9 @@ def task_api() -> Iterator[str]:
 
 
 class McpClient:
-    def __init__(self, environment: dict[str, str]) -> None:
+    def __init__(
+        self, environment: dict[str, str], result_directory: Path | None = None
+    ) -> None:
         command = [
             "docker",
             "run",
@@ -143,6 +145,8 @@ class McpClient:
             "-v",
             f"{SERVER.parent}:/tool:ro",
         ]
+        if result_directory is not None:
+            command.extend(("-v", f"{result_directory}:/results"))
         for name, value in environment.items():
             command.extend(("-e", f"{name}={value}"))
         command.extend((QWEN_IMAGE, "/tool/task_rest_mcp_server.mjs"))
@@ -287,6 +291,54 @@ def test_mcp_protocol_performs_each_fixed_task_operation(mcp: McpClient) -> None
         headers.get("authorization") == "Bearer test-task-token"
         for _, _, headers, _ in TaskApi.calls
     )
+
+
+def test_successful_mutations_are_recorded_but_reads_are_not(
+    tmp_path: Path,
+) -> None:
+    with task_api() as endpoint:
+        client = McpClient(
+            {
+                "UAR_TASK_API_BASE_URL": endpoint,
+                "UAR_AGENT_TOOL_CAPABILITIES": "get_task,create_task",
+                "UAR_TASK_RESULT_LOG": "/results/task-results.jsonl",
+            },
+            tmp_path,
+        )
+        try:
+            created = result(
+                client.request(
+                    "tools/call",
+                    {"name": "create_task", "arguments": {"title": "Parent"}},
+                )
+            )
+            repeated = result(
+                client.request(
+                    "tools/call",
+                    {
+                        "name": "create_task",
+                        "arguments": {"title": "Parent", "description": ""},
+                    },
+                )
+            )
+            result(
+                client.request(
+                    "tools/call",
+                    {"name": "get_task", "arguments": {"task_id": created["id"]}},
+                )
+            )
+        finally:
+            client.close()
+    entries = [
+        json.loads(line)
+        for line in (tmp_path / "task-results.jsonl").read_text().splitlines()
+    ]
+    assert entries == [{"operation": "create_task", "task": created}]
+    assert repeated == created
+    assert [(method, path) for method, path, _, _ in TaskApi.calls] == [
+        ("POST", "/tasks"),
+        ("GET", "/tasks/task-0001"),
+    ]
 
 
 @pytest.mark.parametrize(

@@ -29,4 +29,8 @@ The package and static fixture tests cover the proposed, revised, rejected,
 confirmed, and failure instructions. The opt-in live Qwen/Ollama test selects
 this Skill and exercises the restricted MCP path with an explicitly confirmed
 proposal. On 2026-09-10 it passed against local Docker, Ollama and
-`qwen3:0.6b`. TASK-014 remains the full public-HTTP multi-turn end-to-end proof.
+`qwen3:0.6b`. Selected immutable instructions are also embedded in the Qwen
+turn prompt because Qwen Code does not discover `.agent/skills` packages by
+path alone. TASK-014 verifies the complete public-HTTP multi-turn path and
+withholds declared mutation capabilities until the current message explicitly
+confirms the proposal.

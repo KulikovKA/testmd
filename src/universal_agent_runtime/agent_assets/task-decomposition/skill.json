@@ -9,5 +9,10 @@
     "create_task",
     "create_subtask",
     "update_task"
+  ],
+  "mutation_tool_capabilities": [
+    "create_task",
+    "create_subtask",
+    "update_task"
   ]
 }

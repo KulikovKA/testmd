@@ -2,12 +2,15 @@
 // Narrow MCP bridge for the deployment-configured Task REST service.
 // It deliberately accepts no URL, method, header, or arbitrary body from Qwen.
 
+import fs from "node:fs";
+
 const OPERATIONS = Object.freeze({
   get_task: { method: "GET", path: (input) => `/tasks/${encodeURIComponent(input.task_id)}` },
   create_task: { method: "POST", path: () => "/tasks" },
   create_subtask: { method: "POST", path: (input) => `/tasks/${encodeURIComponent(input.task_id)}/subtasks` },
   update_task: { method: "PATCH", path: (input) => `/tasks/${encodeURIComponent(input.task_id)}` },
 });
+const MUTATIONS = new Set(["create_task", "create_subtask", "update_task"]);
 const TASK_ID = /^task-[0-9]{4,}$/;
 const STATUSES = new Set(["open", "in_progress", "done", "cancelled"]);
 const MAX_RESPONSE_BYTES = Number.parseInt(process.env.UAR_TASK_API_MAX_RESPONSE_BYTES || "65536", 10);
@@ -17,6 +20,8 @@ const allowed = new Set(
 );
 const baseUrl = parseBaseUrl(process.env.UAR_TASK_API_BASE_URL || "");
 const token = process.env.UAR_TASK_API_TOKEN || "";
+const resultLog = process.env.UAR_TASK_RESULT_LOG || "";
+const completedCalls = new Map();
 
 function parseBaseUrl(value) {
   try {
@@ -93,6 +98,16 @@ function validTask(value) {
     exactly(value, ["id", "title", "description", "status", "parent_id", "subtask_ids", "version"]);
 }
 
+function recordMutation(operation, task) {
+  if (!resultLog || !MUTATIONS.has(operation)) return;
+  try {
+    fs.appendFileSync(resultLog, `${JSON.stringify({ operation, task })}\n`, { encoding: "utf8" });
+  } catch {
+    // The validated Task result is still returned to Qwen. The caller treats a
+    // missing result journal as absent evidence and never fabricates a record.
+  }
+}
+
 async function call(operation, input) {
   if (!allowed.has(operation)) return diagnostic("capability_denied", "operation is not enabled for this Agent");
   const invalid = validate(operation, input);
@@ -101,10 +116,13 @@ async function call(operation, input) {
     return diagnostic("service_failure", "Task service deployment configuration is invalid");
   }
   const url = new URL(OPERATIONS[operation].path(input), baseUrl);
+  const body = requestBody(operation, input);
+  const callKey = `${OPERATIONS[operation].method} ${url.pathname}\n${body || ""}`;
+  const completed = MUTATIONS.has(operation) ? completedCalls.get(callKey) : undefined;
+  if (completed !== undefined) return completed;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
-    const body = requestBody(operation, input);
     const headers = body === undefined ? {} : { "content-type": "application/json" };
     if (token) headers.authorization = `Bearer ${token}`;
     const response = await fetch(url, { method: OPERATIONS[operation].method, headers, body, signal: controller.signal });
@@ -128,7 +146,10 @@ async function call(operation, input) {
     if (response.status === 408 || response.status === 504) return diagnostic("timeout", "Task service timed out");
     if (response.status === 422 || response.status === 409 || response.status === 400) return diagnostic("invalid_input", "Task service rejected the fixed request schema");
     if (!response.ok || !validTask(payload)) return diagnostic("service_failure", "Task service failed or returned an invalid schema");
-    return textResult(payload);
+    recordMutation(operation, payload);
+    const result = textResult(payload);
+    if (MUTATIONS.has(operation)) completedCalls.set(callKey, result);
+    return result;
   } catch (error) {
     return diagnostic(error?.name === "AbortError" ? "timeout" : "service_failure", error?.name === "AbortError" ? "Task service timed out" : "Task service is unavailable");
   } finally { clearTimeout(timer); }

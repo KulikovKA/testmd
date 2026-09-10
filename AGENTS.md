@@ -158,6 +158,8 @@
 
 |-- tests/
 
+|   |-- e2e/                   # opt-in full public HTTP/Docker/Ollama scenario
+
 |   |-- api/                   # mock service и Orchestrator HTTP foundation tests
 
 |   |-- contract/              # переиспользуемые conformance-тесты драйверов
@@ -191,6 +193,8 @@
   |-- agent-lifecycle-api.md
 
     |-- restricted-task-rest-tool.md
+
+    |-- local-docker-e2e.md
 
     `-- decisions/
 
@@ -249,6 +253,12 @@ adapter delivers each selected package only to the owning Agent workspace and
 intersects its declared Tool capability IDs with the Agent configuration.
 Skills are instructions only; Tool adapters enforce authorization.
 
+TASK-014 adds the opt-in full local scenario in `tests/e2e/`. It validates the
+public HTTP lifecycle, JSON/SSE conversation, task-decomposition confirmation,
+restricted Task writes, Session continuity, two-Agent isolation, and cleanup.
+The reproducible procedure and bounded-failure notes are in
+`docs/local-docker-e2e.md`.
+
 TASK-010 adds `application/agent_chat.py`, `domain/message.py`, and
 `adapters/docker_agent_qwen.py`. HTTP turns execute in the existing Agent
 container through `AgentInteraction`. The repository owns bounded public
@@ -285,6 +295,16 @@ opt-in:
 $env:RUN_QWEN_OLLAMA_INTEGRATION='1'
 $env:QWEN_OLLAMA_MODEL='qwen3:0.6b'
 .\.venv\Scripts\python.exe -m pytest tests/integration/test_task_rest_tool.py -q
+```
+
+TASK-014 full local end-to-end validation is opt-in and uses the explicitly
+configured non-thinking directive for the validated CPU profile:
+
+```powershell
+ollama pull qwen3:1.7b
+$env:RUN_LOCAL_DOCKER_E2E='1'
+$env:QWEN_OLLAMA_MODEL='qwen3:1.7b'
+.\.venv\Scripts\python.exe -m pytest tests/e2e/test_local_docker_task_decomposition.py -q
 ```
 
 ```text

@@ -78,8 +78,8 @@ For each turn the adapter:
 2. reconstructs bounded authoritative conversation context from
    `history.jsonl`;
 3. starts the pinned Qwen Code `0.23.1` image with a short explicit system
-   prompt, `/think`, no available tool budget, and either `--session-id` or
-   `--resume`;
+   prompt, the validated `/think` or `/no_think` deployment directive, no
+   available tool budget, and either `--session-id` or `--resume`;
 4. requires a successful `stream-json` result with the expected native
    session UUID and non-empty response;
 5. validates/discovers the native transcript, then atomically commits the
@@ -115,7 +115,8 @@ Agent directory, verifies absence, and is idempotent after successful removal.
 TASK-009 connects this cleanup to Agent delete through the separate interaction
 port and verifies stop/start retention through lifecycle fakes. TASK-007 proves
 native workspace retention through `DockerRuntime`; TASK-010 now verifies public
-message continuity. The full business E2E scenario remains TASK-014.
+message continuity. TASK-014 verifies the full business E2E scenario described
+in [local-docker-e2e.md](local-docker-e2e.md).
 
 ## Stable failures
 
@@ -165,7 +166,7 @@ Qwen session state in its named workspace volume across `DockerRuntime`
 stop/start. TASK-009 now initializes one logical Session during Agent create,
 preserves it during stop/start, and calls `delete_session` only after runtime
 cleanup during Agent delete. TASK-010 now provides public message turns and verified HTTP conversation
-continuity; the complete business scenario remains TASK-014.
+continuity; TASK-014 verifies the complete business scenario.
 
 ## TASK-010 composed HTTP execution and failure safety
 

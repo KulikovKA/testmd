@@ -171,6 +171,11 @@ def test_not_found_uses_the_redacted_common_error_envelope(tmp_path: Path) -> No
         ("UAR_DOCKER_NETWORK_MODE", "host", "UAR_DOCKER_NETWORK_MODE"),
         ("UAR_AGENT_CPU_CORES", "0", "UAR_AGENT_CPU_CORES"),
         ("UAR_DOCKER_HEALTHCHECK_RETRIES", "0", "UAR_DOCKER_HEALTHCHECK_RETRIES"),
+        (
+            "UAR_QWEN_REASONING_DIRECTIVE",
+            "fast",
+            "UAR_QWEN_REASONING_DIRECTIVE",
+        ),
     ],
 )
 def test_configuration_is_validated_before_composition(

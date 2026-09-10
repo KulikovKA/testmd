@@ -135,6 +135,7 @@ class ApplicationSettings:
     qwen_model: str
     qwen_api_key_secret_id: str
     qwen_api_key: str = field(repr=False)
+    qwen_reasoning_directive: str = "/think"
     task_api_base_url: str | None = None
     task_api_token_secret_id: str | None = None
     task_api_token: str | None = field(default=None, repr=False)
@@ -174,6 +175,10 @@ class ApplicationSettings:
         if (self.task_api_token_secret_id is None) != (self.task_api_token is None):
             raise ConfigurationError(
                 "Task API token ID and value must be configured together"
+            )
+        if self.qwen_reasoning_directive not in {"/think", "/no_think"}:
+            raise ConfigurationError(
+                "UAR_QWEN_REASONING_DIRECTIVE must be /think or /no_think"
             )
         if self.task_api_token_secret_id is not None:
             _identifier(
@@ -267,6 +272,9 @@ class ApplicationSettings:
             qwen_model=_required(values, "UAR_QWEN_MODEL"),
             qwen_api_key_secret_id=_identifier(values, "UAR_QWEN_API_KEY_SECRET_ID"),
             qwen_api_key=_required(values, "UAR_QWEN_API_KEY"),
+            qwen_reasoning_directive=values.get(
+                "UAR_QWEN_REASONING_DIRECTIVE", "/think"
+            ),
             task_api_base_url=_optional_task_endpoint(values),
             task_api_token_secret_id=task_token_secret_id or None,
             task_api_token=task_token or None,

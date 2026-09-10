@@ -129,8 +129,9 @@ def test_local_public_task_decomposition_flow_isolated_and_cleaned(
                 parsed.port or (443 if parsed.scheme == "https" else 80)
             ),
             "UAR_QWEN_BASE_URL": inference_endpoint,
-            "UAR_QWEN_MODEL": os.getenv("QWEN_OLLAMA_MODEL", "qwen3:0.6b"),
+            "UAR_QWEN_MODEL": os.getenv("QWEN_OLLAMA_MODEL", "qwen3:1.7b"),
             "UAR_QWEN_API_KEY": os.getenv("QWEN_OLLAMA_API_KEY", "ollama"),
+            "UAR_QWEN_REASONING_DIRECTIVE": "/no_think",
             "UAR_TASK_API_BASE_URL": f"http://host.docker.internal:{task_port}",
             "UAR_TASK_API_TIMEOUT_SECONDS": "10",
             "UAR_STREAM_HEARTBEAT_SECONDS": "0.1",
@@ -190,20 +191,34 @@ def test_local_public_task_decomposition_flow_isolated_and_cleaned(
                 assert "Validate API" in str(revised_content)
                 assert task_client.get("/tasks/task-0001").status_code == 404
 
-                confirmed = client.post(
+                confirmed_parent = client.post(
                     first_path + "/messages",
                     json={
                         "content": (
-                            "I explicitly confirm the current proposal: create exactly parent "
-                            "Release Alpha and its one subtask Validate API. Use the allowed Task "
-                            "tools now. In the final response, list the exact id and title fields "
-                            "from both created Tool result records."
+                            "I explicitly confirm the entire current proposal. Execute its first "
+                            "write only: call create_task once with title Release Alpha. Do not "
+                            "create the subtask in this turn. Return the exact Tool result record."
                         )
                     },
                 )
-                assert confirmed.status_code == 201, confirmed.text
-                assistant = confirmed.json()["messages"][-1]["content"]
-                assert "task-0001" in assistant and "task-0002" in assistant
+                assert confirmed_parent.status_code == 201, confirmed_parent.text
+                parent_assistant = confirmed_parent.json()["messages"][-1]["content"]
+                assert "task-0001" in parent_assistant
+                assert task_client.get("/tasks/task-0002").status_code == 404
+
+                confirmed_child = client.post(
+                    first_path + "/messages",
+                    json={
+                        "content": (
+                            "Continue the confirmed proposal. I explicitly confirm its remaining "
+                            "write: call create_subtask once with task_id task-0001 and title "
+                            "Validate API. Return the exact Tool result record."
+                        )
+                    },
+                )
+                assert confirmed_child.status_code == 201, confirmed_child.text
+                child_assistant = confirmed_child.json()["messages"][-1]["content"]
+                assert "task-0002" in child_assistant
 
                 parent = task_client.get("/tasks/task-0001")
                 child = task_client.get("/tasks/task-0002")

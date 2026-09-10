@@ -134,8 +134,8 @@ def test_existing_agent_container_is_selected_and_home_is_non_root(
         assert archive.getmembers()[0].name.rstrip("/.") == ".qwen-home"
         assert all(member.uid == member.gid == 10001 for member in archive)
         assert ".agent/skills/task-decomposition/SKILL.md" in archive.getnames()
-    assert commands[-1][0] == "qwen"
-    prompt = commands[-1][commands[-1].index("-p") + 1]
+    qwen_command = next(command for command in commands if command[0] == "qwen")
+    prompt = qwen_command[qwen_command.index("-p") + 1]
     assert "Selected Skill: task-decomposition@1.0.0." in prompt
 
 

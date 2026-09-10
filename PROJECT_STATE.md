@@ -1,11 +1,12 @@
 # Состояние проекта
 
-Last updated: 2026-09-10 after completing TASK-013.
+Last updated: 2026-09-10 after completing TASK-014.
 
 ## Текущий статус
 
-- TASK-000 through TASK-013 are DONE.
+- TASK-000 through TASK-014 are DONE.
 - TASK-013 packages the `task-decomposition@1.0.0` Skill, delivers it per Agent, and verifies its restricted confirmed-Task flow with local Docker, Ollama and Qwen Code.
+- TASK-014 verifies the full public HTTP, Docker, Qwen Code, external Ollama, Skill, restricted Task Tool, multi-Agent isolation, Session continuity, and cleanup path.
 - TASK-004 реализует локальный `DockerRuntime` для runtime-neutral порта `AgentRuntime`.
 - TASK-005 добавляет ограниченный исполняемый probe Qwen Code/Ollama, не добавляя conversation/session port в application layer.
 - TASK-006 реализует persistent Qwen session adapter за отдельным runtime-neutral портом `AgentInteraction`.
@@ -275,7 +276,7 @@ git status --short -- .
 git diff --check -- .
 ```
 
-## Последняя валидация
+## TASK-012 validation archive
 
 Date: 2026-09-09. Result: PASS for TASK-012.
 
@@ -391,12 +392,56 @@ changes that were preserved without modification:
   transport, Qwen adapter delivery, its tests, and documentation. Earlier
   TASK-012 working-tree changes remain preserved.
 
-## Рекомендуемая следующая задача
+## TASK-014 latest validation
 
-TASK-014 — Локальный сквозной тест Docker.
+Date: 2026-09-10. Result: PASS for TASK-014.
 
-TASK-014 remains TODO. Do not start without an explicit user instruction.
+- Opt-in full local E2E: 1 passed in 291.35 s with real Docker Desktop,
+  external Ollama, `qwen3:1.7b`, Qwen Code `0.23.1`, and `/no_think`.
+- The test started real TCP Orchestrator and mock Task services, created and
+  awaited two READY Agents only through public Orchestrator APIs, and observed
+  two distinct managed containers and workspaces.
+- JSON proposal and committed-content SSE revision completed. Public Task API
+  reads proved no mutation before explicit confirmation.
+- Confirmed `create_task` and `create_subtask` calls produced exact validated
+  records in the public responses; the Task API verified `task-0001` as parent
+  of `task-0002`. Per-turn duplicate mutation calls are idempotent.
+- Stop/start preserved the first Agent's unpredictable marker. A subsequent
+  turn in the second Agent did not contain it, proving runtime, Workspace, and
+  Session isolation.
+- Full pytest: 351 passed, 6 opt-in tests skipped; two existing
+  Starlette/HTTPX/AnyIO deprecation warnings only.
+- Focused post-type-fix session/transport tests: 53 passed. Earlier focused
+  Task/Qwen/configuration checks: 88 passed.
+- Ruff format --check: PASS, 104 files already formatted. Ruff lint: PASS.
+- mypy `src tests`: PASS, 75 source files. `git diff --check`: PASS.
+- Managed Docker container and volume inventories were empty after the passing
+  scenario and final validation.
+- All TASK-014 acceptance criteria are verified. Evidence and retry procedure:
+  [local-docker-e2e.md](docs/local-docker-e2e.md).
 
-Recommended model: GPT-5.6 Sol.
+## TASK-014 changed files
+
+- `.env.example`, `AGENTS.md`, `TASKS.md`, `PROJECT_STATE.md`
+- `docs/architecture.md`, `docs/local-docker-e2e.md`,
+  `docs/orchestrator-api-foundation.md`, `docs/qwen-session.md`,
+  `docs/skill-packaging.md`
+- `src/universal_agent_runtime/configuration.py`, `composition.py`
+- `src/universal_agent_runtime/adapters/docker_agent_qwen.py`,
+  `qwen_session.py`, `skill_packages.py`, `task_rest_mcp_server.mjs`
+- `src/universal_agent_runtime/agent_assets/task-decomposition/SKILL.md`,
+  `skill.json`
+- `tests/e2e/test_local_docker_task_decomposition.py`
+- `tests/api/test_orchestrator_foundation.py`
+- `tests/unit/test_docker_agent_qwen.py`, `test_qwen_session.py`,
+  `test_skill_packages.py`, `test_task_rest_mcp.py`
+
+## Recommended next task
+
+TASK-015 - Kata environment research and validation.
+
+TASK-015 remains TODO. Do not start without an explicit user instruction.
+
+Recommended model: GPT-6 Astra.
 
 Recommended reasoning level: High.

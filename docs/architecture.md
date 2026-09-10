@@ -112,12 +112,15 @@ Configuration Agent валидируется до provisioning и разделя
 
 `task-decomposition@1.0.0` is a strict built-in `skill.json` and `SKILL.md`
 package. The Qwen adapter delivers each selected package only to its owning
-Agent workspace and adds a bounded package reference plus effective
-capabilities to the Qwen prompt. The application and runtime transport selected package IDs without
-task-decomposition branching. A Skill declares Tool capabilities but never
-grants them: effective capabilities are the intersection with the Agent's
-configured Tools, and the Tool adapter independently enforces that set. The
-detailed package contract is in `docs/skill-packaging.md` and ADR 0009.
+Agent workspace and embeds the trusted instructions plus effective capabilities
+in that Agent's prompt. The application and runtime transport selected package
+IDs without task-decomposition branching. A Skill declares Tool capabilities
+but never grants them: effective capabilities are the intersection with the
+Agent's configured Tools, mutation capabilities remain unavailable until the
+current message explicitly confirms the workflow, and the Tool adapter
+independently enforces that set. The detailed package contract is in
+`docs/skill-packaging.md` and ADR 0009. TASK-014 validates the complete local
+path documented in `docs/local-docker-e2e.md`.
 Skills — версионируемые пакеты поведения на стороне агента. Первый Skill, `task-decomposition`, предоставляет доменные инструкции и рекомендации по использованию tools. Runtime только доставляет выбранные Skills; он не содержит ветвлений для декомпозиции задач. Контракт упаковки и discovery окончательно определяется в TASK-013 после того, как станет известна интеграция Qwen.
 
 ### Tools

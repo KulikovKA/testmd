@@ -32,6 +32,7 @@ adds [JSON chat/history](agent-chat-api.md); TASK-011 adds
 | `UAR_AGENT_READINESS_TIMEOUT_SECONDS`, `UAR_AGENT_READINESS_POLL_INTERVAL_SECONDS` | Overall start/readiness polling policy |
 | `UAR_QWEN_SESSION_STORAGE_ROOT` | Не-root local storage для adapter-owned Session artifacts |
 | `UAR_QWEN_BASE_URL`, `UAR_QWEN_MODEL` | Deployment-owned внешний Ollama endpoint и model |
+| `UAR_QWEN_REASONING_DIRECTIVE` | Validated `/think` or `/no_think`; defaults to `/think` |
 | `UAR_QWEN_API_KEY_SECRET_ID` | Non-secret runtime reference used by `SecretBinding` |
 | `UAR_QWEN_API_KEY` | Runtime credential; safe `ollama` placeholder допустим только для локального Ollama |
 
@@ -103,6 +104,7 @@ $env:UAR_AGENT_READINESS_POLL_INTERVAL_SECONDS='0.1'
 $env:UAR_QWEN_SESSION_STORAGE_ROOT='.runtime/qwen-sessions'
 $env:UAR_QWEN_BASE_URL='http://host.docker.internal:11434/v1'
 $env:UAR_QWEN_MODEL='qwen3:1.7b'
+$env:UAR_QWEN_REASONING_DIRECTIVE='/think'
 $env:UAR_QWEN_API_KEY_SECRET_ID='local-ollama-key'
 $env:UAR_QWEN_API_KEY='ollama'
 .\.venv\Scripts\python.exe -m uvicorn universal_agent_runtime.http_api:create_application_from_environment --factory --host $env:UAR_API_HOST --port $env:UAR_API_PORT

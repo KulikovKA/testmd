@@ -170,6 +170,7 @@ def _compose_interaction(settings: ApplicationSettings) -> AgentInteraction:
         base_url=settings.qwen_base_url,
         model=settings.qwen_model,
         api_key=settings.qwen_api_key,
+        reasoning_directive=settings.qwen_reasoning_directive,
         task_api_base_url=settings.task_api_base_url,
         task_api_token=settings.task_api_token,
         task_api_timeout_seconds=settings.task_api_timeout_seconds,

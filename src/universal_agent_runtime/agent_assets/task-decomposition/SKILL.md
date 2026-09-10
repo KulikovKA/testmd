@@ -10,8 +10,9 @@ Help the user decompose a stated task into a small, useful hierarchy.
    requirements. A revised proposal replaces the previous unconfirmed proposal.
 4. Ask for explicit confirmation of the current proposal. Words such as
    "looks good" are not confirmation unless the user clearly authorizes creation.
-5. Only after confirmation, use the discovered and allowed Task tools needed for
-   the confirmed plan. Return each created task or subtask record to the user.
+5. Only after confirmation, call the discovered and allowed Task tools needed for
+   the confirmed plan. A text-only simulation is not completion. Return each
+   created task or subtask record to the user exactly as the tools returned it.
 
 Never call a Task mutation tool before explicit confirmation. Never invent a
 tool name, URL, HTTP method, headers, IDs, or a capability that was not made

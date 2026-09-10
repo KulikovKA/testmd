@@ -33,6 +33,9 @@ def test_builtin_task_decomposition_is_versioned_and_instructs_safe_flow() -> No
     fragment = skill.prompt_fragment(("get_task", "create_task"))
     assert "Effective tool capabilities: get_task, create_task" in fragment
     assert "The selection does not add tool capabilities" in fragment
+    assert "never simulate it" in fragment
+    assert "<SELECTED_SKILL_INSTRUCTIONS>" in fragment
+    assert "Propose a structured decomposition before creating" in fragment
 
 
 def test_skill_effective_tools_are_an_intersection_not_an_authorization_grant() -> None:
@@ -42,6 +45,18 @@ def test_skill_effective_tools_are_an_intersection_not_an_authorization_grant() 
     )
 
     assert effective == ("get_task", "update_task")
+
+
+def test_mutation_tools_require_explicit_confirmation_in_current_message() -> None:
+    ((skill, granted),) = SkillPackageCatalog.builtins().resolve(
+        ("task-decomposition",),
+        ("get_task", "create_task", "create_subtask", "update_task"),
+    )
+
+    assert skill.authorized_tools(granted, "Revise the proposal only.") == ("get_task",)
+    assert skill.authorized_tools(
+        granted, "I explicitly confirm the current proposal."
+    ) == ("get_task", "create_task", "create_subtask", "update_task")
 
 
 @pytest.mark.parametrize(

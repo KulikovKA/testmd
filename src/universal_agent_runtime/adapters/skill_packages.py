@@ -18,7 +18,13 @@ _MANIFEST_FIELDS = {
     "summary",
     "instruction_file",
     "tool_capabilities",
+    "mutation_tool_capabilities",
 }
+_EXPLICIT_CONFIRMATION = re.compile(
+    r"\bexplicit(?:ly)?\s+confirm(?:ation|ed|ing)?\b|"
+    r"\bявно\s+подтвержда(?:ю|ем|ете|ет)\b",
+    re.IGNORECASE,
+)
 
 
 class SkillPackageError(ValueError):
@@ -32,6 +38,7 @@ class SkillPackage:
     summary: str
     instructions: str
     tool_capabilities: tuple[str, ...]
+    mutation_tool_capabilities: tuple[str, ...]
     source_directory: Path
 
     def prompt_fragment(self, granted_tools: tuple[str, ...]) -> str:
@@ -40,7 +47,24 @@ class SkillPackage:
             f"Selected Skill: {self.identifier}@{self.version}.\n"
             f"Its immutable package is at .agent/skills/{self.identifier}.\n"
             f"Effective tool capabilities: {capabilities}.\n"
-            "Follow its package workflow. The selection does not add tool capabilities."
+            "Follow its package workflow. The selection does not add tool capabilities. "
+            "When an effective mutation capability is listed, execute the mutation "
+            "explicitly requested in CURRENT_USER_MESSAGE with that tool; never simulate it.\n"
+            "<SELECTED_SKILL_INSTRUCTIONS>\n"
+            f"{self.instructions.rstrip()}\n"
+            "</SELECTED_SKILL_INSTRUCTIONS>"
+        )
+
+    def authorized_tools(
+        self, granted_tools: tuple[str, ...], current_message: str
+    ) -> tuple[str, ...]:
+        effective = tuple(
+            tool for tool in granted_tools if tool in self.tool_capabilities
+        )
+        if _EXPLICIT_CONFIRMATION.search(current_message) is not None:
+            return effective
+        return tuple(
+            tool for tool in effective if tool not in self.mutation_tool_capabilities
         )
 
 
@@ -97,6 +121,7 @@ def load_skill_package(directory: Path) -> SkillPackage:
     summary = raw["summary"]
     instruction_file = raw["instruction_file"]
     tools = raw["tool_capabilities"]
+    mutation_tools = raw["mutation_tool_capabilities"]
     try:
         if not isinstance(identifier, str):
             raise TypeError
@@ -122,6 +147,13 @@ def load_skill_package(directory: Path) -> SkillPackage:
             validate_identifier(tool)
     except ValueError as error:
         raise SkillPackageError("Skill tool capability is invalid") from error
+    if (
+        not isinstance(mutation_tools, list)
+        or any(not isinstance(tool, str) for tool in mutation_tools)
+        or len(mutation_tools) != len(set(mutation_tools))
+        or any(tool not in tools for tool in mutation_tools)
+    ):
+        raise SkillPackageError("Skill mutation capabilities are invalid")
     instructions_path = directory / instruction_file
     if not instructions_path.is_file() or instructions_path.is_symlink():
         raise SkillPackageError("Skill instructions are missing")
@@ -137,5 +169,6 @@ def load_skill_package(directory: Path) -> SkillPackage:
         summary,
         instructions,
         tuple(tools),
+        tuple(mutation_tools),
         directory,
     )

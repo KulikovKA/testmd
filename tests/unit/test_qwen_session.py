@@ -17,6 +17,7 @@ from universal_agent_runtime.adapters.qwen_session import (
     QwenRunnerFailure,
     QwenSessionAdapter,
     QwenSessionConfig,
+    _append_task_results,
 )
 from universal_agent_runtime.application.ports.interaction_errors import (
     InteractionErrorCode,
@@ -92,6 +93,59 @@ def config(root: Path, **changes: object) -> QwenSessionConfig:
     return QwenSessionConfig(**values)  # type: ignore[arg-type]
 
 
+def test_verified_task_results_are_appended_without_model_paraphrase() -> None:
+    task: dict[str, object] = {
+        "id": "task-0001",
+        "title": "Release Alpha",
+        "description": "",
+        "status": "open",
+        "parent_id": None,
+        "subtask_ids": [],
+        "version": 1,
+    }
+    execution = QwenExecution(uuid4(), "Model answer with [parent_id]")
+    result = _append_task_results(
+        execution,
+        (json.dumps({"operation": "create_task", "task": task}) + "\n").encode(),
+        ("create_task",),
+        65_536,
+    )
+    assert result.response.startswith(execution.response)
+    assert json.dumps(task, separators=(",", ":")) in result.response
+
+
+@pytest.mark.parametrize(
+    "raw,allowed",
+    [
+        (b"not-json\n", ("create_task",)),
+        (
+            b'{"operation":"create_task","task":{"id":"invented"}}\n',
+            ("create_task",),
+        ),
+        (
+            b'{"operation":"create_task","task":{}}\n',
+            ("get_task",),
+        ),
+        (
+            b"".join(
+                (
+                    b'{"operation":"create_task","task":{"id":"task-0001",',
+                    b'"title":"x","description":"","status":[],',
+                    b'"parent_id":null,"subtask_ids":[],"version":1}}\n',
+                )
+            ),
+            ("create_task",),
+        ),
+    ],
+)
+def test_untrusted_task_result_journal_is_rejected(
+    raw: bytes, allowed: tuple[str, ...]
+) -> None:
+    with pytest.raises(QwenRunnerFailure) as failure:
+        _append_task_results(QwenExecution(uuid4(), "answer"), raw, allowed, 65_536)
+    assert failure.value.code is QwenRunnerErrorCode.PROTOCOL_FAILURE
+
+
 @pytest.mark.parametrize(
     "changes",
     [
@@ -105,6 +159,7 @@ def config(root: Path, **changes: object) -> QwenSessionConfig:
         {"max_history_characters": 0},
         {"max_transcript_bytes": 0},
         {"image": ""},
+        {"reasoning_directive": "fast"},
     ],
 )
 def test_invalid_adapter_configuration_is_rejected(
@@ -470,7 +525,20 @@ def test_qwen_command_allows_only_enabled_task_mcp_tools(tmp_path: Path) -> None
     assert "create_task" not in command
     assert "create_subtask" not in command
     system_prompt = command[command.index("--system-prompt") + 1]
+    assert "a text-only simulation is invalid" in system_prompt
     assert "copy the returned id, title, parent_id, and subtask_ids" in system_prompt
+
+
+def test_qwen_command_uses_explicit_non_thinking_directive(tmp_path: Path) -> None:
+    runner = object.__new__(DockerQwenCommandRunner)
+    runner._config = config(tmp_path / "sessions", reasoning_directive="/no_think")
+    invocation = QwenInvocation(
+        tmp_path / "home", tmp_path / "workspace", uuid4(), "message", False
+    )
+
+    command = runner.command(invocation)
+
+    assert command[command.index("-p") + 1].startswith("/no_think ")
 
 
 @pytest.mark.parametrize(

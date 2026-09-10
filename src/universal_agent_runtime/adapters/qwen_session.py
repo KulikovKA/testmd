@@ -51,9 +51,13 @@ _TASK_SYSTEM_PROMPT = (
     "Use facts from the prior conversation when needed. Never repeat an earlier "
     "assistant reply unless CURRENT_USER_MESSAGE explicitly asks for it. Use only "
     "a discovered Task tool when it is necessary to answer the current request. "
-    "Never invent a URL, HTTP method, headers, or a tool name. After a Task "
-    "mutation succeeds, copy the returned id, title, parent_id, and subtask_ids "
-    "values into the final answer exactly; never substitute or infer them."
+    "If the current request explicitly authorizes a Task creation or update and "
+    "the matching tool is available, you must call that tool; a text-only "
+    "simulation is invalid. Never claim that a mutation succeeded without a "
+    "successful Tool result. Never invent a URL, HTTP method, headers, or a tool "
+    "name. After a Task mutation succeeds, copy the returned id, title, parent_id, "
+    "and subtask_ids values into the final answer exactly; never substitute or "
+    "infer them."
 )
 TASK_TOOL_OPERATIONS = (
     "get_task",
@@ -61,6 +65,8 @@ TASK_TOOL_OPERATIONS = (
     "create_subtask",
     "update_task",
 )
+TASK_MUTATION_OPERATIONS = ("create_task", "create_subtask", "update_task")
+TASK_RESULT_LOG_PATH = "/workspace/.uar-tools/task-results.jsonl"
 
 
 @dataclass(frozen=True)
@@ -84,6 +90,7 @@ class QwenSessionConfig:
     task_api_max_response_bytes: int = 65_536
     task_mcp_server_path: str = "/workspace/.uar-tools/task_rest_mcp_server.mjs"
     task_mcp_config_path: str = "/root/.qwen/task-mcp-config.json"
+    reasoning_directive: str = "/think"
 
     def __post_init__(self) -> None:
         if not isinstance(self.storage_root, Path):
@@ -145,6 +152,8 @@ class QwenSessionConfig:
             or "\x00" in self.task_mcp_config_path
         ):
             raise ValueError("Task MCP configuration is invalid")
+        if self.reasoning_directive not in {"/think", "/no_think"}:
+            raise ValueError("reasoning_directive must be /think or /no_think")
 
 
 @dataclass(frozen=True)
@@ -156,6 +165,7 @@ class QwenInvocation:
     resume: bool
     task_operations: tuple[str, ...] = ()
     skill_instructions: tuple[str, ...] = ()
+    current_message: str = field(default="", repr=False)
 
 
 @dataclass(frozen=True)
@@ -245,17 +255,23 @@ class DockerQwenCommandRunner:
                     "CURRENT_USER_MESSAGE:\n" + invocation.prompt,
                 )
             )
-        command.extend(("-p", f"/think {prompt}"))
+        command.extend(("-p", f"{self._config.reasoning_directive} {prompt}"))
         return command
 
     def run(self, invocation: QwenInvocation) -> QwenExecution:
         command = self.command(invocation)
         container = None
+        result_log = invocation.workspace / ".uar-tools" / "task-results.jsonl"
         try:
+            try:
+                result_log.unlink(missing_ok=True)
+            except OSError:
+                raise QwenRunnerFailure(QwenRunnerErrorCode.OPERATION_FAILED) from None
             environment = {
                 "OLLAMA_API_KEY": self._config.api_key,
                 "OPENAI_API_KEY": self._config.api_key,
                 "UAR_AGENT_TOOL_CAPABILITIES": ",".join(invocation.task_operations),
+                "UAR_TASK_RESULT_LOG": TASK_RESULT_LOG_PATH,
             }
             if self._config.task_api_base_url is not None:
                 environment.update(
@@ -297,12 +313,29 @@ class DockerQwenCommandRunner:
                 raise QwenRunnerFailure(QwenRunnerErrorCode.TIMEOUT)
             if status != 0:
                 raise QwenRunnerFailure(_classify_runner_output(output))
-            return _parse_qwen_output(output, invocation.native_session_id)
+            execution = _parse_qwen_output(output, invocation.native_session_id)
+            return _append_task_results(
+                execution,
+                result_log.read_bytes() if result_log.is_file() else b"",
+                invocation.task_operations,
+                self._config.task_api_max_response_bytes,
+            )
         except QwenRunnerFailure:
             raise
-        except (ImageNotFound, DockerException, KeyError, TypeError, ValueError):
+        except (
+            ImageNotFound,
+            DockerException,
+            KeyError,
+            OSError,
+            TypeError,
+            ValueError,
+        ):
             raise QwenRunnerFailure(QwenRunnerErrorCode.OPERATION_FAILED) from None
         finally:
+            try:
+                result_log.unlink(missing_ok=True)
+            except OSError:
+                pass
             if container is not None:
                 try:
                     container.remove(force=True)
@@ -374,6 +407,91 @@ def _parse_qwen_output(output: str, expected: UUID) -> QwenExecution:
     if response.lstrip().startswith("[API Error:"):
         raise QwenRunnerFailure(QwenRunnerErrorCode.INFERENCE_UNAVAILABLE)
     return QwenExecution(actual, response)
+
+
+def _append_task_results(
+    execution: QwenExecution,
+    raw: bytes,
+    allowed_operations: tuple[str, ...],
+    max_response_bytes: int,
+) -> QwenExecution:
+    if not raw:
+        return execution
+    if len(raw) > max_response_bytes * 4:
+        raise QwenRunnerFailure(QwenRunnerErrorCode.PROTOCOL_FAILURE)
+    records: list[dict[str, Any]] = []
+    try:
+        lines = raw.decode("utf-8").splitlines()
+        if not 1 <= len(lines) <= 4:
+            raise ValueError
+        for line in lines:
+            entry = json.loads(line)
+            if (
+                not isinstance(entry, dict)
+                or set(entry) != {"operation", "task"}
+                or entry["operation"] not in TASK_MUTATION_OPERATIONS
+                or entry["operation"] not in allowed_operations
+                or not _valid_task_record(entry["task"])
+            ):
+                raise ValueError
+            records.append(entry)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        raise QwenRunnerFailure(QwenRunnerErrorCode.PROTOCOL_FAILURE) from None
+    rendered = "\n".join(
+        json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+        for record in records
+    )
+    return replace(
+        execution,
+        response=f"{execution.response.rstrip()}\n\nVerified Task records:\n{rendered}",
+    )
+
+
+def _valid_task_record(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "id",
+        "title",
+        "description",
+        "status",
+        "parent_id",
+        "subtask_ids",
+        "version",
+    }:
+        return False
+    task_id = value["id"]
+    parent_id = value["parent_id"]
+    subtask_ids = value["subtask_ids"]
+    return (
+        isinstance(task_id, str)
+        and task_id.startswith("task-")
+        and task_id[5:].isdigit()
+        and len(task_id) >= 9
+        and isinstance(value["title"], str)
+        and 1 <= len(value["title"]) <= 200
+        and isinstance(value["description"], str)
+        and len(value["description"]) <= 4_000
+        and isinstance(value["status"], str)
+        and value["status"] in {"open", "in_progress", "done", "cancelled"}
+        and (
+            parent_id is None
+            or (
+                isinstance(parent_id, str)
+                and parent_id.startswith("task-")
+                and parent_id[5:].isdigit()
+                and len(parent_id) >= 9
+            )
+        )
+        and isinstance(subtask_ids, list)
+        and all(
+            isinstance(identifier, str)
+            and identifier.startswith("task-")
+            and identifier[5:].isdigit()
+            and len(identifier) >= 9
+            for identifier in subtask_ids
+        )
+        and type(value["version"]) is int
+        and value["version"] >= 1
+    )
 
 
 class QwenSessionAdapter:
@@ -714,6 +832,7 @@ class QwenSessionAdapter:
                     state.native_session_id,
                     prompt,
                     resume=transcript is not None,
+                    current_message=request.message,
                 )
             )
         except QwenRunnerFailure as error:
