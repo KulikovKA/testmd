@@ -22,12 +22,12 @@ def test_builtin_task_decomposition_is_versioned_and_instructs_safe_flow() -> No
     assert skill.version == "1.0.0"
     assert effective == skill.tool_capabilities
     for expected in (
-        "Propose a structured decomposition before creating",
-        "Ask for explicit confirmation",
-        "Never call a Task mutation tool before explicit confirmation",
-        "If the user cancels, stop without writing",
-        "partially fails",
-        "duplicate is possible",
+        "До создания или изменения данных предложите",
+        "Запросите явное подтверждение",
+        "Никогда не вызывайте Task Tool",
+        "Если пользователь отменил действие, остановитесь без записи",
+        "частично не удалась",
+        "дубликат, не делайте",
     ):
         assert expected in skill.instructions
     fragment = skill.prompt_fragment(("get_task", "create_task"))
@@ -35,7 +35,7 @@ def test_builtin_task_decomposition_is_versioned_and_instructs_safe_flow() -> No
     assert "The selection does not add tool capabilities" in fragment
     assert "never simulate it" in fragment
     assert "<SELECTED_SKILL_INSTRUCTIONS>" in fragment
-    assert "Propose a structured decomposition before creating" in fragment
+    assert "До создания или изменения данных предложите" in fragment
 
 
 def test_skill_effective_tools_are_an_intersection_not_an_authorization_grant() -> None:
@@ -56,6 +56,9 @@ def test_mutation_tools_require_explicit_confirmation_in_current_message() -> No
     assert skill.authorized_tools(granted, "Revise the proposal only.") == ("get_task",)
     assert skill.authorized_tools(
         granted, "I explicitly confirm the current proposal."
+    ) == ("get_task", "create_task", "create_subtask", "update_task")
+    assert skill.authorized_tools(
+        granted, "Явно подтверждаю текущее предложение."
     ) == ("get_task", "create_task", "create_subtask", "update_task")
 
 

@@ -1,0 +1,20 @@
+[Unit]
+Description=Universal Agent Runtime Orchestrator
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=uar
+Group=uar
+WorkingDirectory=/opt/universal-agent-runtime
+EnvironmentFile=/etc/universal-agent-runtime/orchestrator.env
+ExecStart=/bin/sh /opt/universal-agent-runtime/run-orchestrator.sh
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

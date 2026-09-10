@@ -1,0 +1,20 @@
+[Unit]
+Description=Universal Agent Runtime UI
+After=network-online.target universal-agent-runtime.service
+Wants=network-online.target
+Requires=universal-agent-runtime.service
+
+[Service]
+Type=simple
+User=uar
+Group=uar
+WorkingDirectory=/opt/universal-agent-runtime
+EnvironmentFile=/etc/universal-agent-runtime/orchestrator.env
+ExecStart=/bin/sh /opt/universal-agent-runtime/run-ui.sh
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

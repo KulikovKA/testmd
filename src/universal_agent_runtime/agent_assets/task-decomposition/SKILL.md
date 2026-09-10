@@ -1,27 +1,32 @@
-# Task decomposition
+# Декомпозиция задачи
 
-Help the user decompose a stated task into a small, useful hierarchy.
+Помогите пользователю разложить сформулированную задачу на небольшую и полезную
+иерархию.
 
-1. Understand the task and any supplied context. If a referenced task must be
-   inspected, use `get_task` only when that capability is available.
-2. Propose a structured decomposition before creating or changing anything.
-   State assumptions, ordering, and the records that would be created.
-3. Incorporate additional context and revise the proposal when the user changes
-   requirements. A revised proposal replaces the previous unconfirmed proposal.
-4. Ask for explicit confirmation of the current proposal. Words such as
-   "looks good" are not confirmation unless the user clearly authorizes creation.
-5. Only after confirmation, call the discovered and allowed Task tools needed for
-   the confirmed plan. A text-only simulation is not completion. Return each
-   created task or subtask record to the user exactly as the tools returned it.
+1. Разберитесь в задаче и предоставленном контексте. Если нужно изучить
+   упомянутую задачу, используйте `get_task` только при наличии этой capability.
+2. До создания или изменения данных предложите структурированную декомпозицию.
+   Укажите допущения, порядок работ и записи, которые будут созданы.
+3. Если пользователь добавил контекст или изменил требования, учтите это и
+   обновите предложение. Обновлённое предложение заменяет предыдущее,
+   неподтверждённое.
+4. Запросите явное подтверждение текущего предложения. Фразы вроде «выглядит
+   хорошо» не являются подтверждением, пока пользователь однозначно не разрешит
+   создание записей.
+5. Только после подтверждения вызывайте доступные и разрешённые Task Tool,
+   необходимые для согласованного плана. Текстовая имитация не считается
+   выполнением. Верните пользователю каждую созданную запись задачи или подзадачи
+   в точности в том виде, в каком её вернул Tool.
 
-Never call a Task mutation tool before explicit confirmation. Never invent a
-tool name, URL, HTTP method, headers, IDs, or a capability that was not made
-available. The Skill is instruction only: the runtime tool policy is the source
-of authorization.
+Никогда не вызывайте Task Tool, изменяющий данные, до явного подтверждения. Не
+придумывайте имя Tool, URL, HTTP method, headers, ID или capability, которые не
+были предоставлены. Skill содержит только инструкции; источник разрешений —
+политика Tool в runtime.
 
-If the user cancels, stop without writing. If requirements change after
-confirmation but before a write, return to proposal and request confirmation
-again. If a write partially fails, report the records already returned by the
-tool, do not retry blindly, and ask the user whether to inspect or continue.
-If a response is invalid or a duplicate is possible, do not guess; report the
-safe failure and request clarification or an inspection with an available tool.
+Если пользователь отменил действие, остановитесь без записи. Если требования
+изменились после подтверждения, но до записи, вернитесь к предложению и снова
+запросите подтверждение. Если запись частично не удалась, сообщите о записях,
+которые Tool уже вернул, не повторяйте запрос вслепую и спросите пользователя,
+нужно ли проверить состояние или продолжить. Если ответ некорректен или возможен
+дубликат, не делайте предположений: сообщите о безопасном отказе и запросите
+уточнение либо проверку доступным Tool.

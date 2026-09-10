@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Universal Agent Runtime</title>
+<style>
+:root{
+  color-scheme:dark;--bg:#07111f;--panel:#0d192a;--panel2:#111f33;--line:#223652;
+  --text:#eef6ff;--muted:#8da2bc;--accent:#35c2ff;--accent2:#7769ff;--ok:#48d58a;
+  --warn:#ffbd55;--bad:#ff6f7e;--user:#173a5e
+}
+*{box-sizing:border-box} body{margin:0;background:
+radial-gradient(circle at 12% 6%,rgba(53,194,255,.11),transparent 30rem),
+radial-gradient(circle at 88% 4%,rgba(119,105,255,.10),transparent 30rem),var(--bg);
+color:var(--text);font:14px/1.45 Inter,Segoe UI,system-ui,sans-serif}
+button,input,textarea{font:inherit}.shell{width:min(1460px,calc(100% - 28px));margin:auto;padding:22px 0}
+header{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:16px}
+.brand{display:flex;align-items:center;gap:12px}.logo{width:42px;height:42px;border-radius:13px;
+display:grid;place-items:center;font-weight:900;color:#06101d;background:linear-gradient(135deg,var(--accent),var(--accent2))}
+h1{font-size:20px;margin:0}.sub{color:var(--muted);font-size:12px;margin-top:2px}
+.status{padding:9px 12px;border:1px solid var(--line);border-radius:12px;background:#0b1625;color:var(--muted);font-size:12px}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--warn);margin-right:7px}
+.dot.ok{background:var(--ok)}.dot.bad{background:var(--bad)}
+.layout{display:grid;grid-template-columns:360px minmax(0,1fr);gap:15px;min-height:calc(100vh - 110px)}
+.card{border:1px solid var(--line);border-radius:18px;background:linear-gradient(180deg,rgba(17,31,51,.97),rgba(10,20,34,.97));
+box-shadow:0 18px 60px rgba(0,0,0,.25)}
+aside{padding:18px;overflow:auto}.section+.section{border-top:1px solid var(--line);margin-top:18px;padding-top:18px}
+.title{font-weight:800;margin-bottom:10px}label.small{display:block;color:var(--muted);font-size:11px;margin:10px 0 6px}
+.check{display:flex;align-items:center;gap:9px;padding:9px 10px;margin:7px 0;border:1px solid var(--line);border-radius:10px;background:#091522}
+.check input{accent-color:var(--accent)} input[type=text],textarea{width:100%;border:1px solid var(--line);background:#081321;color:var(--text);
+border-radius:11px;padding:10px;outline:none}input:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(53,194,255,.08)}
+.row{display:flex;gap:8px}.row>*{flex:1}.btn{cursor:pointer;border:1px solid var(--line);border-radius:11px;background:#14253d;color:var(--text);
+padding:10px 12px;font-weight:750}.btn:hover:not(:disabled){border-color:#45678f}.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn.primary{border:0;background:linear-gradient(135deg,#169fdf,#6558e8)}.btn.danger{background:#351923;border-color:#6f2b3a;color:#ffb2ba}
+.full{width:100%;margin-top:10px}.meta{display:grid;grid-template-columns:92px 1fr;gap:7px 9px;font-size:12px}.meta dt{color:var(--muted)}
+.meta dd{margin:0;word-break:break-all}.pill{display:inline-block;padding:3px 7px;border:1px solid var(--line);border-radius:999px;font-weight:800}
+.notice{min-height:17px;margin-top:10px;color:var(--muted);font-size:11px}.notice.ok{color:#8be8b6}.notice.bad{color:#ffa0aa}
+main{min-width:0;display:grid;grid-template-rows:auto 1fr auto;overflow:hidden}.chathead{padding:15px 18px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between}
+.chathead strong{display:block}.chathead span{color:var(--muted);font-size:11px}#messages{overflow:auto;padding:22px;display:flex;flex-direction:column;gap:13px}
+.empty{margin:auto;text-align:center;color:var(--muted);max-width:460px;line-height:1.6}.empty strong{display:block;color:var(--text);font-size:18px;margin-bottom:5px}
+.msg{max-width:min(820px,86%);display:flex;flex-direction:column}.msg.user{align-self:flex-end}.msg.assistant{align-self:flex-start}
+.bubble{white-space:pre-wrap;overflow-wrap:anywhere;padding:12px 14px;border:1px solid var(--line);border-radius:15px;background:#111e31}
+.user .bubble{background:var(--user);border-color:#2b5e8c}.stamp{font-size:10px;color:var(--muted);margin-top:4px}.user .stamp{text-align:right}
+.composer{padding:14px;border-top:1px solid var(--line);background:#081321}.compose{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:end}
+textarea{resize:vertical;min-height:56px;max-height:190px}.send{min-width:105px;min-height:56px}
+@media(max-width:900px){.layout{grid-template-columns:1fr}main{min-height:70vh}header{align-items:flex-start;flex-direction:column}}
+</style>
+</head>
+<body>
+<div class="shell">
+<header>
+  <div class="brand"><div class="logo">UA</div><div><h1>Universal Agent Runtime</h1><div class="sub">Orchestrator → isolated Agent → Qwen Code</div></div></div>
+  <div class="status"><span id="statusDot" class="dot"></span><span id="statusText">Проверяю Orchestrator…</span></div>
+</header>
+
+<div class="layout">
+<aside class="card">
+  <div class="section">
+    <div class="title">Новый агент</div>
+    <label class="small">Skill</label>
+    <label class="check"><input id="skill" type="checkbox" checked>task-decomposition</label>
+
+    <label class="small">Разрешённые Task tools</label>
+    <label class="check"><input class="tool" value="get_task" type="checkbox">get_task</label>
+    <label class="check"><input class="tool" value="create_task" type="checkbox" checked>create_task</label>
+    <label class="check"><input class="tool" value="create_subtask" type="checkbox" checked>create_subtask</label>
+    <label class="check"><input class="tool" value="update_task" type="checkbox">update_task</label>
+    <button id="create" class="btn primary full">Создать и запустить</button>
+  </div>
+
+  <div class="section">
+    <div class="title">Подключиться</div>
+    <label class="small">Agent ID</label>
+    <div class="row"><input id="agentInput" type="text" placeholder="agent_..."><button id="attach" class="btn">Открыть</button></div>
+  </div>
+
+  <div class="section">
+    <div class="title">Текущий агент</div>
+    <dl class="meta">
+      <dt>State</dt><dd><span id="agentState" class="pill">—</span></dd>
+      <dt>Agent</dt><dd id="agentId">—</dd>
+      <dt>Workspace</dt><dd id="workspaceId">—</dd>
+      <dt>Session</dt><dd id="sessionId">—</dd>
+      <dt>Runtime</dt><dd id="runtime">—</dd>
+      <dt>Workload</dt><dd id="workload">—</dd>
+    </dl>
+    <div class="row" style="margin-top:13px"><button id="start" class="btn">Start</button><button id="stop" class="btn">Stop</button></div>
+    <div class="row" style="margin-top:8px"><button id="refresh" class="btn">Refresh</button><button id="delete" class="btn danger">Delete</button></div>
+    <div id="notice" class="notice"></div>
+  </div>
+</aside>
+
+<main class="card">
+  <div class="chathead">
+    <div><strong>Чат с агентом</strong><span id="chatSub">Создай или открой Agent</span></div>
+    <button id="history" class="btn">История</button>
+  </div>
+
+  <div id="messages"><div class="empty"><strong>Готово к работе</strong>UI общается только с Agent Orchestrator. Ollama, Skill и Task REST остаются за runtime boundary.</div></div>
+
+  <div class="composer">
+    <div class="compose"><textarea id="prompt" placeholder="Напиши задачу агенту…"></textarea><button id="send" class="btn primary send">Отправить</button></div>
+    <div class="notice">Enter — отправить, Shift+Enter — новая строка.</div>
+  </div>
+</main>
+</div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const app={agentId:localStorage.getItem("uar_agent_id")||"",agent:null,busy:false};
+
+async function api(path,options={}){
+  const res=await fetch(path,{headers:{"Content-Type":"application/json",...(options.headers||{})},...options});
+  const text=await res.text(); let body=null;
+  if(text){try{body=JSON.parse(text)}catch{body={error:{message:"Некорректный ответ"}}}}
+  if(!res.ok){const e=new Error(body?.error?.message||body?.detail||`HTTP ${res.status}`);e.status=res.status;throw e}
+  return body
+}
+function notice(t="",k=""){$("notice").textContent=t;$("notice").className=`notice ${k}`}
+function requestId(){return `ui_${Date.now()}_${crypto.randomUUID().replaceAll("-","").slice(0,12)}`}
+function setAgentId(id){app.agentId=id||"";$("agentInput").value=app.agentId;if(id)localStorage.setItem("uar_agent_id",id);else localStorage.removeItem("uar_agent_id")}
+function renderAgent(a){
+  app.agent=a;
+  $("agentState").textContent=a?.state||"—";$("agentId").textContent=a?.agent_id||"—";
+  $("workspaceId").textContent=a?.workspace_id||"—";$("sessionId").textContent=a?.session_id||"—";
+  $("runtime").textContent=a?.runtime?`${a.runtime.execution} / ${a.runtime.readiness}`:"—";
+  $("workload").textContent=a?.configuration?.workload||"—";
+  $("chatSub").textContent=a?`${a.agent_id} · ${a.state}`:"Создай или открой Agent";
+  const ready=a?.state==="READY",stopped=a?.state==="STOPPED";
+  $("start").disabled=!a||!stopped||app.busy;$("stop").disabled=!a||!ready||app.busy;
+  $("delete").disabled=!a||app.busy;$("refresh").disabled=!a||app.busy;$("history").disabled=!a;
+  $("send").disabled=!ready||app.busy;$("prompt").disabled=!ready||app.busy
+}
+function clearAgent(){setAgentId("");renderAgent(null);$("messages").innerHTML='<div class="empty"><strong>Agent не выбран</strong>Создай нового агента или подключись по Agent ID.</div>'}
+async function status(){
+  try{const x=await api("/api/status");$("statusDot").className="dot ok";$("statusText").textContent=`Orchestrator READY · ${x?.readiness?.runtime_driver||"unknown"}`}
+  catch{$("statusDot").className="dot bad";$("statusText").textContent="Orchestrator недоступен"}
+}
+async function inspect(show=true){
+  if(!app.agentId){renderAgent(null);return null}
+  try{const a=await api(`/api/agents/${encodeURIComponent(app.agentId)}`);renderAgent(a);return a}
+  catch(e){if(e.status===404)clearAgent();if(show)notice(e.message,"bad");return null}
+}
+function renderMessages(items){
+  const box=$("messages");
+  if(!items?.length){box.innerHTML='<div class="empty"><strong>История пуста</strong>Отправь первое сообщение текущему агенту.</div>';return}
+  box.innerHTML="";
+  for(const m of items){
+    const w=document.createElement("div");w.className=`msg ${m.role}`;
+    const b=document.createElement("div");b.className="bubble";b.textContent=m.content;
+    const s=document.createElement("div");s.className="stamp";s.textContent=`#${m.sequence} · ${m.role}`;
+    w.append(b,s);box.appendChild(w)
+  }
+  box.scrollTop=box.scrollHeight
+}
+async function history(){
+  if(!app.agentId)return;
+  try{const x=await api(`/api/agents/${encodeURIComponent(app.agentId)}/messages?after=0&limit=50`);renderMessages(x.messages||[])}
+  catch(e){notice(e.message,"bad")}
+}
+async function busy(fn){
+  if(app.busy)return;app.busy=true;renderAgent(app.agent);
+  try{await fn()}finally{app.busy=false;renderAgent(app.agent)}
+}
+async function create(){
+  await busy(async()=>{
+    notice("Создаю Agent…");
+    const tools=[...document.querySelectorAll(".tool:checked")].map(x=>x.value);
+    const a=await api("/api/agents",{method:"POST",body:JSON.stringify({request_id:requestId(),skills:$("skill").checked?["task-decomposition"]:[],tools})});
+    setAgentId(a.agent_id);renderAgent(a);notice("Запускаю runtime…");
+    const started=await api(`/api/agents/${encodeURIComponent(app.agentId)}/start`,{method:"POST"});
+    renderAgent(started);await history();notice("Agent READY","ok")
+  })
+}
+async function attach(){const id=$("agentInput").value.trim();if(!id)return;setAgentId(id);const a=await inspect();if(a){await history();notice("Agent открыт","ok")}}
+async function lifecycle(action){
+  if(!app.agentId)return;
+  await busy(async()=>{notice(`${action}…`);const a=await api(`/api/agents/${encodeURIComponent(app.agentId)}/${action}`,{method:"POST"});renderAgent(a);notice(`${action} выполнен`,"ok")})
+}
+async function del(){
+  if(!app.agentId||!confirm(`Удалить Agent ${app.agentId}?`))return;
+  await busy(async()=>{
+    const id=app.agentId;
+    if(app.agent?.state==="READY"){try{await api(`/api/agents/${encodeURIComponent(id)}/stop`,{method:"POST"})}catch{}}
+    await api(`/api/agents/${encodeURIComponent(id)}`,{method:"DELETE"});clearAgent();notice("Agent удалён","ok")
+  })
+}
+async function send(){
+  const content=$("prompt").value.trim();if(!content||!app.agentId||app.agent?.state!=="READY")return;
+  await busy(async()=>{
+    $("prompt").value="";notice("Agent выполняет ход…");
+    try{await api(`/api/agents/${encodeURIComponent(app.agentId)}/messages`,{method:"POST",body:JSON.stringify({content})});await history();await inspect(false);notice("Ответ получен","ok")}
+    catch(e){await inspect(false);await history();notice(e.message,"bad")}
+  })
+}
+$("create").onclick=()=>create().catch(e=>notice(e.message,"bad"));
+$("attach").onclick=()=>attach().catch(e=>notice(e.message,"bad"));
+$("start").onclick=()=>lifecycle("start").catch(e=>notice(e.message,"bad"));
+$("stop").onclick=()=>lifecycle("stop").catch(e=>notice(e.message,"bad"));
+$("delete").onclick=()=>del().catch(e=>notice(e.message,"bad"));
+$("refresh").onclick=async()=>{await inspect();await history()};
+$("history").onclick=history;$("send").onclick=()=>send().catch(e=>notice(e.message,"bad"));
+$("prompt").addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send().catch(x=>notice(x.message,"bad"))}});
+(async()=>{renderAgent(null);await status();if(app.agentId){$("agentInput").value=app.agentId;const a=await inspect(false);if(a)await history()}setInterval(status,10000);setInterval(()=>inspect(false),5000)})();
+</script>
+</body>
+</html>

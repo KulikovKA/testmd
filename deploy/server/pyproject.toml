@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools==69.5.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "universal-agent-runtime"
+version = "0.1.0"
+description = "Universal Agent Runtime server deployment."
+requires-python = ">=3.11"
+dependencies = [
+    "docker==7.2.0",
+    "fastapi==0.141.1",
+    "uvicorn==0.52.4",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["universal_agent_runtime*"]
+
+[tool.setuptools.package-data]
+"universal_agent_runtime.adapters" = ["*.mjs"]
+"universal_agent_runtime.agent_assets" = ["task-decomposition/*.json", "task-decomposition/*.md"]
