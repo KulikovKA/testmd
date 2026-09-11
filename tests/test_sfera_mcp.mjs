@@ -2,9 +2,15 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-const serverPath = process.env.MCP_SERVER || new URL("../src/universal_agent_runtime/adapters/task_rest_mcp_server.mjs", import.meta.url).pathname;
+const serverPath = process.env.MCP_SERVER || fileURLToPath(
+  new URL("../src/universal_agent_runtime/adapters/task_rest_mcp_server.mjs", import.meta.url),
+);
 const secret = "sfera-password-must-not-leak";
 
 const task = {
@@ -95,6 +101,47 @@ function login(response, value = "one") {
   response.writeHead(200, { "Set-Cookie": [`SESSION=${value}; HttpOnly`, `ROUTE=${value}; Path=/`] });
   response.end("{}");
 }
+
+async function requestOptionsFor(extraCaPath) {
+  const original = process.env.NODE_EXTRA_CA_CERTS;
+  if (extraCaPath === undefined) delete process.env.NODE_EXTRA_CA_CERTS;
+  else process.env.NODE_EXTRA_CA_CERTS = extraCaPath;
+  try {
+    const moduleUrl = `${pathToFileURL(serverPath).href}?transport-test=${Date.now()}-${Math.random()}`;
+    const { sferaRequestOptions } = await import(moduleUrl);
+    return sferaRequestOptions(
+      new URL("https://sfera.ai.dev.sfera-t1.ru/app/tasks/api/v1/entity-views/TTEST2-94"),
+      { method: "GET", headers: { cookie: "SESSION=test" } },
+    );
+  }
+  finally {
+    if (original === undefined) delete process.env.NODE_EXTRA_CA_CERTS;
+    else process.env.NODE_EXTRA_CA_CERTS = original;
+  }
+}
+
+test("HTTPS transport adds the custom CA and partial-chain trust without disabling TLS", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "uar-sfera-ca-"));
+  const certificate = join(directory, "sfera-ca.pem");
+  const contents = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
+  try {
+    await writeFile(certificate, contents, "utf8");
+    const options = await requestOptionsFor(certificate);
+    assert.deepEqual(options.ca, Buffer.from(contents));
+    assert.equal(options.allowPartialTrustChain, true);
+    assert.equal(options.rejectUnauthorized, undefined);
+    assert.equal(options.checkServerIdentity, undefined);
+  }
+  finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("HTTPS transport preserves system TLS trust when no custom CA is configured", async () => {
+  const options = await requestOptionsFor(undefined);
+  assert.equal(options.ca, undefined);
+  assert.equal(options.allowPartialTrustChain, undefined);
+  assert.equal(options.rejectUnauthorized, undefined);
+  assert.equal(options.checkServerIdentity, undefined);
+});
 
 test("get_task logs in with exact JSON, retains all cookies, and exposes only get_task", async () => {
   await withMcp(async (request, response) => {

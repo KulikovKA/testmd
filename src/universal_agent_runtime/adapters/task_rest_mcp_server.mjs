@@ -2,12 +2,18 @@
 // Read-only Sfera Task MCP bridge. Qwen cannot select a URL, method, header,
 // request body, or operation beyond get_task.
 
+import fs from "node:fs";
+import http from "node:http";
+import https from "node:https";
+import { fileURLToPath } from "node:url";
+
 const ENTITY_NUMBER = /^[A-Z][A-Z0-9]{1,31}-[1-9][0-9]{0,9}$/;
 const MAX_RESPONSE_BYTES = Number.parseInt(process.env.UAR_SFERA_MAX_RESPONSE_BYTES || "65536", 10);
 const TIMEOUT_MS = Number.parseInt(process.env.UAR_SFERA_TIMEOUT_MS || "10000", 10);
 const baseUrl = parseBaseUrl(process.env.UAR_SFERA_BASE_URL || "");
 const username = process.env.UAR_SFERA_USERNAME || "";
 const password = process.env.UAR_SFERA_PASSWORD || "";
+const customCaPath = process.env.NODE_EXTRA_CA_CERTS || "";
 const allowed = new Set((process.env.UAR_AGENT_TOOL_CAPABILITIES || "").split(",").filter((name) => name === "get_task"));
 let sessionCookie = null;
 
@@ -40,9 +46,9 @@ function validEntityNumber(value) {
 }
 
 function cookies(response) {
-  const raw = response.headers.get("set-cookie");
-  const values = typeof response.headers.getSetCookie === "function"
-    ? response.headers.getSetCookie()
+  const raw = response.headers["set-cookie"];
+  const values = Array.isArray(raw)
+    ? raw
     : typeof raw === "string"
       ? raw.split(/,(?=[^;,]+=)/)
       : [];
@@ -50,27 +56,54 @@ function cookies(response) {
 }
 
 async function readResponse(response) {
-  const declared = Number.parseInt(response.headers.get("content-length") || "0", 10);
+  const length = response.headers["content-length"];
+  const declared = Number.parseInt(Array.isArray(length) ? length[0] : length || "0", 10);
   if (declared > MAX_RESPONSE_BYTES) throw new Error("response_limit");
   const chunks = [];
   let received = 0;
-  if (response.body) {
-    for await (const chunk of response.body) {
-      const bytes = Buffer.from(chunk);
-      received += bytes.length;
-      if (received > MAX_RESPONSE_BYTES) throw new Error("response_limit");
-      chunks.push(bytes);
-    }
+  for await (const chunk of response) {
+    const bytes = Buffer.from(chunk);
+    received += bytes.length;
+    if (received > MAX_RESPONSE_BYTES) throw new Error("response_limit");
+    chunks.push(bytes);
   }
   return Buffer.concat(chunks).toString("utf8");
 }
 
+export function sferaRequestOptions(url, options) {
+  const headers = { ...options.headers };
+  if (options.body && !Object.hasOwn(headers, "content-length")) {
+    headers["content-length"] = Buffer.byteLength(options.body);
+  }
+  const result = {
+    hostname: url.hostname,
+    port: url.port || undefined,
+    path: `${url.pathname}${url.search}`,
+    method: options.method,
+    headers,
+  };
+  if (url.protocol === "https:" && customCaPath) {
+    result.ca = fs.readFileSync(customCaPath);
+    result.allowPartialTrustChain = true;
+  }
+  return result;
+}
+
 async function fetchWithTimeout(url, options) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  let request;
+  const response = new Promise((resolveResponse, rejectResponse) => {
+    const transport = url.protocol === "https:" ? https : http;
+    request = transport.request(sferaRequestOptions(url, options), resolveResponse);
+    request.once("error", rejectResponse);
+    if (options.body) request.write(options.body);
+    request.end();
+  });
+  const timeout = new Error("timeout");
+  timeout.name = "AbortError";
+  const timer = setTimeout(() => request?.destroy(timeout), TIMEOUT_MS);
   try {
-    const response = await fetch(url, { ...options, signal: controller.signal });
-    return { response, raw: await readResponse(response) };
+    const incoming = await response;
+    return { response: incoming, raw: await readResponse(incoming) };
   }
   finally { clearTimeout(timer); }
 }
@@ -81,8 +114,8 @@ async function login() {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ username, password }),
   });
-  if (response.status === 401 || response.status === 403) throw new Error("authentication_failed");
-  if (!response.ok) throw new Error("service_failure");
+  if (response.statusCode === 401 || response.statusCode === 403) throw new Error("authentication_failed");
+  if (response.statusCode < 200 || response.statusCode >= 300) throw new Error("service_failure");
   const value = cookies(response);
   if (!value) throw new Error("authentication_failed");
   sessionCookie = value;
@@ -135,15 +168,15 @@ async function getTask(entityNumber) {
   if (!sessionCookie) await login();
   const url = new URL(`/app/tasks/api/v1/entity-views/${encodeURIComponent(entityNumber)}`, baseUrl);
   let { response, raw } = await fetchWithTimeout(url, { method: "GET", headers: { cookie: sessionCookie } });
-  if (response.status === 401) {
+  if (response.statusCode === 401) {
     sessionCookie = null;
     await login();
     ({ response, raw } = await fetchWithTimeout(url, { method: "GET", headers: { cookie: sessionCookie } }));
   }
-  if (response.status === 404) throw new Error("not_found");
-  if (response.status === 401 || response.status === 403) throw new Error("authentication_failed");
-  if (response.status === 408 || response.status === 504) throw new Error("timeout");
-  if (!response.ok) throw new Error("service_failure");
+  if (response.statusCode === 404) throw new Error("not_found");
+  if (response.statusCode === 401 || response.statusCode === 403) throw new Error("authentication_failed");
+  if (response.statusCode === 408 || response.statusCode === 504) throw new Error("timeout");
+  if (response.statusCode < 200 || response.statusCode >= 300) throw new Error("service_failure");
   let payload;
   try { payload = JSON.parse(raw); } catch { throw new Error("invalid_schema"); }
   return normalizeTask(payload);
@@ -175,24 +208,36 @@ const definition = {
 function reply(id, result) { process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`); }
 function error(id, code, message) { process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } })}\n`); }
 
-let buffer = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => {
-  buffer += chunk;
-  let end;
-  while ((end = buffer.indexOf("\n")) >= 0) {
-    const line = buffer.slice(0, end);
-    buffer = buffer.slice(end + 1);
-    if (!line.trim()) continue;
-    Promise.resolve().then(async () => {
-      let request;
-      try { request = JSON.parse(line); } catch { return; }
-      if (!object(request) || request.jsonrpc !== "2.0" || typeof request.method !== "string") return;
-      const id = request.id;
-      if (request.method === "initialize") return reply(id, { protocolVersion: request.params?.protocolVersion || "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "restricted-sfera-task", version: "1.0.0" } });
-      if (request.method === "tools/list") return reply(id, { tools: allowed.has("get_task") ? [{ name: "get_task", ...definition }] : [] });
-      if (request.method === "tools/call") return reply(id, await call(request.params?.name, request.params?.arguments));
-      if (id !== undefined) error(id, -32601, "method not found");
-    });
+function startStdioServer() {
+  let buffer = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => {
+    buffer += chunk;
+    let end;
+    while ((end = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, end);
+      buffer = buffer.slice(end + 1);
+      if (!line.trim()) continue;
+      Promise.resolve().then(async () => {
+        let request;
+        try { request = JSON.parse(line); } catch { return; }
+        if (!object(request) || request.jsonrpc !== "2.0" || typeof request.method !== "string") return;
+        const id = request.id;
+        if (request.method === "initialize") return reply(id, { protocolVersion: request.params?.protocolVersion || "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "restricted-sfera-task", version: "1.0.0" } });
+        if (request.method === "tools/list") return reply(id, { tools: allowed.has("get_task") ? [{ name: "get_task", ...definition }] : [] });
+        if (request.method === "tools/call") return reply(id, await call(request.params?.name, request.params?.arguments));
+        if (id !== undefined) error(id, -32601, "method not found");
+      });
+    }
+  });
+}
+
+function isEntryPoint() {
+  try {
+    return process.argv[1]
+      && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
   }
-});
+  catch { return false; }
+}
+
+if (isEntryPoint()) startStdioServer();
