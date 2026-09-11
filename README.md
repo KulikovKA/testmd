@@ -32,25 +32,28 @@ Orchestrator сохраняет владение Agent, его workspace и Qwen
 `runtime="kata"` при создании контейнера. Один Agent соответствует одной Kata
 microVM от create до delete; между сообщениями microVM не пересоздаётся.
 
-## Sfera: только чтение
+## Sfera
 
-При заданных `UAR_SFERA_*` Agent получает единственный MCP Tool: `get_task`.
+При заданных `UAR_SFERA_*` Agent получает `get_task`; при дополнительно заданном
+`UAR_SFERA_DEFAULT_OWNER` capability `create_task` создаёт только обычную Task.
 MCP сам выполняет `POST /app/ppau/api/auth/login`, удерживает все полученные
 cookies только в памяти своего дочернего процесса и затем вызывает строго
-фиксированный `GET /app/tasks/api/v1/entity-views/{entityNumber}`. При первом
-ответе `401` он очищает cookies, выполняет один login и повторяет GET один раз.
+фиксированные endpoints `GET /app/tasks/api/v1/entity-views/{entityNumber}` и
+`POST /app/tasks/api/v1/entities`. При первом ответе `401` он очищает cookies,
+выполняет один login и повторяет исходный запрос один раз.
 
 Qwen не может передавать URL, HTTP method, headers или произвольное тело.
 Принимаются только номера вида `TTEST2-94`; ответ нормализуется и ограничивается
-по размеру. Стандартная TLS-проверка Node `fetch` остаётся включённой.
+по размеру. Стандартная TLS-проверка native Node HTTPS остаётся включённой.
 Если сертификат Sfera подписан дополнительным корпоративным CA, задайте
 `UAR_SFERA_CA_CERT_PATH` как абсолютный путь к PEM на host. При создании Agent
 Orchestrator копирует PEM в его изолированный workspace; Node MCP получает путь
 через `NODE_EXTRA_CA_CERTS`. Это добавляет trust anchor и не отключает системную
 TLS-проверку. Если переменная не задана, Node использует только стандартный
 системный trust store.
-`create_task`, `create_subtask` и `update_task` намеренно не предоставляются:
-их реальные контракты Sfera ещё не подтверждены.
+Поддерживаются только `get_task` и `create_task`. Не поддерживаются
+`update_task`, `delete_task` и `create_subtask`. `create_task` фиксирует
+`status=created` и `type=task`; не создаёт связи parent/child или native subtask.
 
 `task-decomposition` остаётся независимым от Tool: с пустым списком Tools он
 составляет план, а с `get_task` может дополнительно прочитать задачу.
@@ -125,6 +128,7 @@ UAR_SFERA_USERNAME_SECRET_ID=sfera-username
 UAR_SFERA_USERNAME=<secret>
 UAR_SFERA_PASSWORD_SECRET_ID=sfera-password
 UAR_SFERA_PASSWORD=<secret>
+UAR_SFERA_DEFAULT_OWNER=<sfera-owner>
 UAR_SFERA_CA_CERT_PATH=/etc/universal-agent-runtime/sfera-ca.pem
 ```
 

@@ -38,7 +38,7 @@
         "header": [{ "key": "Content-Type", "value": "application/json" }],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"request_id\": \"postman-{{$guid}}\",\n  \"skills\": [\"task-decomposition\"],\n  \"tools\": [\"get_task\"]\n}"
+          "raw": "{\n  \"request_id\": \"postman-{{$guid}}\",\n  \"skills\": [\"task-decomposition\"],\n  \"tools\": [\"get_task\", \"create_task\"]\n}"
         },
         "url": "{{base_url}}/agents"
       }
@@ -60,7 +60,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"threadId\": \"{{thread_id}}\",\n  \"runId\": \"{{run_id}}\",\n  \"state\": {},\n  \"messages\": [{\n    \"id\": \"postman-message-1\",\n    \"role\": \"user\",\n    \"content\": \"Составь декомпозицию задачи TTEST2-94.\"\n  }],\n  \"tools\": [],\n  \"context\": [],\n  \"forwardedProps\": {}\n}"
+          "raw": "{\n  \"threadId\": \"{{thread_id}}\",\n  \"runId\": \"{{run_id}}\",\n  \"state\": {},\n  \"messages\": [{\n    \"id\": \"postman-message-1\",\n    \"role\": \"user\",\n    \"content\": \"Декомпозируй эпик TTEST2-89 на 4 задачи и создай их в Sfera. Сначала прочитай исходную задачу через get_task. Создавай только обычные задачи в том же area. Исходную задачу не изменяй.\"\n  }],\n  \"tools\": [],\n  \"context\": [],\n  \"forwardedProps\": {}\n}"
         },
         "url": "{{base_url}}/ag-ui/agents/{{agent_id}}/run"
       }

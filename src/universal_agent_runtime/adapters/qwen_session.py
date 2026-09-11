@@ -30,6 +30,7 @@ from universal_agent_runtime.application.ports.interaction_values import (
     TurnRequest,
     TurnResult,
 )
+from universal_agent_runtime.domain.identifiers import validate_identifier
 
 QWEN_CODE_VERSION = "0.23.1"
 QWEN_IMAGE = (
@@ -51,11 +52,13 @@ _TASK_SYSTEM_PROMPT = (
     "Use facts from the prior conversation when needed. Never repeat an earlier "
     "assistant reply unless CURRENT_USER_MESSAGE explicitly asks for it. Use only "
     "a discovered Task tool when it is necessary to answer the current request. "
-    "The available Task tool is read-only. Never claim that a Task was changed, "
-    "never invent a URL, HTTP method, headers, or a tool name, and never simulate "
-    "an unavailable mutation."
+    "get_task reads a Task. create_task creates only an ordinary Task when it is "
+    "available and the selected Skill authorizes an explicit current-user creation "
+    "request. Never claim a Task was created without a successful tool result, "
+    "never invent Task numbers, URLs, HTTP methods, headers, or tool names, and "
+    "never simulate an unavailable mutation."
 )
-TASK_TOOL_OPERATIONS = ("get_task",)
+TASK_TOOL_OPERATIONS = ("get_task", "create_task")
 
 
 @dataclass(frozen=True)
@@ -76,6 +79,7 @@ class QwenSessionConfig:
     sfera_base_url: str | None = None
     sfera_username: str | None = field(default=None, repr=False)
     sfera_password: str | None = field(default=None, repr=False)
+    sfera_default_owner: str | None = None
     sfera_ca_cert_path: Path | None = None
     sfera_timeout_seconds: float = 10.0
     sfera_max_response_bytes: int = 65_536
@@ -132,6 +136,11 @@ class QwenSessionConfig:
             raise ValueError("Sfera username and password must be configured together")
         if self.sfera_base_url is not None and not self.sfera_username:
             raise ValueError("Sfera configuration requires username and password")
+        if self.sfera_default_owner is not None:
+            try:
+                validate_identifier(self.sfera_default_owner)
+            except ValueError as error:
+                raise ValueError("sfera_default_owner is invalid") from error
         if self.sfera_ca_cert_path is not None:
             if self.sfera_base_url is None:
                 raise ValueError("Sfera CA certificate requires Sfera configuration")
@@ -235,7 +244,7 @@ class DockerQwenCommandRunner:
             "--max-session-turns",
             str(self._config.max_session_turns),
             "--max-tool-calls",
-            str(4 if invocation.task_operations else 0),
+            str(10 if invocation.task_operations else 0),
             "--max-wall-time",
             f"{self._config.wall_time_seconds}s",
             "--exclude-tools",
@@ -292,6 +301,13 @@ class DockerQwenCommandRunner:
             if invocation.task_operations and self._config.sfera_username is not None:
                 environment["UAR_SFERA_USERNAME"] = self._config.sfera_username
                 environment["UAR_SFERA_PASSWORD"] = self._config.sfera_password or ""
+            if (
+                "create_task" in invocation.task_operations
+                and self._config.sfera_default_owner is not None
+            ):
+                environment["UAR_SFERA_DEFAULT_OWNER"] = (
+                    self._config.sfera_default_owner
+                )
             if (
                 invocation.task_operations
                 and self._config.sfera_ca_cert_path is not None
@@ -498,7 +514,7 @@ class QwenSessionAdapter:
             mcp_server = {
                 "command": "node",
                 "args": [self._config.task_mcp_server_path],
-                "includeTools": ["get_task"],
+                "includeTools": list(TASK_TOOL_OPERATIONS),
                 "trust": True,
                 "timeout": round(self._config.sfera_timeout_seconds * 1000),
             }

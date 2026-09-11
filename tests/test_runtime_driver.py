@@ -173,9 +173,11 @@ class RuntimeDriverConfigurationTests(unittest.TestCase):
                 "UAR_SFERA_USERNAME": "private-user",
                 "UAR_SFERA_PASSWORD_SECRET_ID": "sfera-password",
                 "UAR_SFERA_PASSWORD": "private-password",
+                "UAR_SFERA_DEFAULT_OWNER": "sfera-admin",
             }
         )
         self.assertEqual(settings.sfera_base_url, "https://sfera.ai.dev.sfera-t1.ru")
+        self.assertEqual(settings.sfera_default_owner, "sfera-admin")
         self.assertNotIn("private-user", repr(settings))
         self.assertNotIn("private-password", repr(settings))
         with self.assertRaisesRegex(ConfigurationError, "Sfera"):
@@ -184,6 +186,14 @@ class RuntimeDriverConfigurationTests(unittest.TestCase):
                     **_environment("docker"),
                     "UAR_SFERA_BASE_URL": "https://sfera.ai.dev.sfera-t1.ru",
                     "UAR_SFERA_USERNAME_SECRET_ID": "sfera-username",
+                }
+            )
+
+        with self.assertRaisesRegex(ConfigurationError, "UAR_SFERA_DEFAULT_OWNER"):
+            ApplicationSettings.from_environment(
+                {
+                    **_environment("docker"),
+                    "UAR_SFERA_DEFAULT_OWNER": "invalid owner",
                 }
             )
 

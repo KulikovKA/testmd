@@ -13,8 +13,13 @@ const TIMEOUT_MS = Number.parseInt(process.env.UAR_SFERA_TIMEOUT_MS || "10000", 
 const baseUrl = parseBaseUrl(process.env.UAR_SFERA_BASE_URL || "");
 const username = process.env.UAR_SFERA_USERNAME || "";
 const password = process.env.UAR_SFERA_PASSWORD || "";
+const defaultOwner = process.env.UAR_SFERA_DEFAULT_OWNER || "";
 const customCaPath = process.env.NODE_EXTRA_CA_CERTS || "";
-const allowed = new Set((process.env.UAR_AGENT_TOOL_CAPABILITIES || "").split(",").filter((name) => name === "get_task"));
+const allowed = new Set(
+  (process.env.UAR_AGENT_TOOL_CAPABILITIES || "")
+    .split(",")
+    .filter((name) => name === "get_task" || (name === "create_task" && validDefaultOwner())),
+);
 let sessionCookie = null;
 
 function parseBaseUrl(value) {
@@ -41,8 +46,38 @@ function validConfiguration() {
   return baseUrl && username && password && Number.isInteger(MAX_RESPONSE_BYTES) && MAX_RESPONSE_BYTES >= 1024 && Number.isInteger(TIMEOUT_MS) && TIMEOUT_MS >= 1;
 }
 
+function validDefaultOwner() {
+  return /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(defaultOwner);
+}
+
 function validEntityNumber(value) {
   return typeof value === "string" && ENTITY_NUMBER.test(value);
+}
+
+function validArea(value) {
+  return typeof value === "string" && /^[A-Z][A-Z0-9]{1,31}$/.test(value);
+}
+
+function validPriority(value) {
+  return value === "low" || value === "average";
+}
+
+function validPlainText(value, minimum, maximum) {
+  return typeof value === "string"
+    && value.length >= minimum
+    && value.length <= maximum
+    && !/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/.test(value)
+    && !/<\/?[A-Za-z][^>]*>/u.test(value);
+}
+
+function htmlDescription(value) {
+  const escaped = value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+  return `<p>${escaped.replace(/\r\n?|\n/g, "<br>")}</p>`;
 }
 
 function cookies(response) {
@@ -121,6 +156,10 @@ async function login() {
   sessionCookie = value;
 }
 
+function isSuccess(response) {
+  return response.statusCode >= 200 && response.statusCode < 300;
+}
+
 function safeText(value, minimum, maximum) {
   return typeof value === "string" && value.length >= minimum && value.length <= maximum && !value.includes("\0");
 }
@@ -176,17 +215,67 @@ async function getTask(entityNumber) {
   if (response.statusCode === 404) throw new Error("not_found");
   if (response.statusCode === 401 || response.statusCode === 403) throw new Error("authentication_failed");
   if (response.statusCode === 408 || response.statusCode === 504) throw new Error("timeout");
-  if (response.statusCode < 200 || response.statusCode >= 300) throw new Error("service_failure");
+  if (!isSuccess(response)) throw new Error("service_failure");
   let payload;
   try { payload = JSON.parse(raw); } catch { throw new Error("invalid_schema"); }
   return normalizeTask(payload);
 }
 
+async function createTask(input) {
+  if (!sessionCookie) await login();
+  const url = new URL("/app/tasks/api/v1/entities", baseUrl);
+  const body = JSON.stringify({
+    area: input.area,
+    description: htmlDescription(input.description),
+    name: input.name,
+    owner: defaultOwner,
+    priority: input.priority,
+    status: "created",
+    type: "task",
+  });
+  let { response, raw } = await fetchWithTimeout(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: sessionCookie },
+    body,
+  });
+  if (response.statusCode === 401) {
+    sessionCookie = null;
+    await login();
+    ({ response, raw } = await fetchWithTimeout(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: sessionCookie },
+      body,
+    }));
+  }
+  if (response.statusCode === 403) throw new Error("authentication_failed");
+  if (response.statusCode === 408 || response.statusCode === 504) throw new Error("timeout");
+  if (response.statusCode !== 201) throw new Error("service_failure");
+  let payload;
+  try { payload = JSON.parse(raw); } catch { throw new Error("invalid_schema"); }
+  const { children: _children, ...normalized } = normalizeTask(payload);
+  return normalized;
+}
+
+function validCreateInput(input) {
+  return object(input)
+    && Object.keys(input).length === 4
+    && validArea(input.area)
+    && validPlainText(input.name, 1, 2_000)
+    && validPlainText(input.description, 0, 16_000)
+    && validPriority(input.priority);
+}
+
 async function call(name, input) {
-  if (name !== "get_task" || !allowed.has(name)) return diagnostic("capability_denied", "operation is not enabled for this Agent");
-  if (!object(input) || Object.keys(input).length !== 1 || !validEntityNumber(input.entity_number)) return diagnostic("invalid_input", "entity_number is invalid");
+  if (!allowed.has(name)) return diagnostic("capability_denied", "operation is not enabled for this Agent");
   if (!validConfiguration()) return diagnostic("service_failure", "Sfera deployment configuration is invalid");
-  try { return textResult(await getTask(input.entity_number)); }
+  if (name === "get_task" && (!object(input) || Object.keys(input).length !== 1 || !validEntityNumber(input.entity_number))) return diagnostic("invalid_input", "entity_number is invalid");
+  if (name === "create_task" && (!validDefaultOwner() || !validCreateInput(input))) return diagnostic("invalid_input", "Task creation input is invalid");
+  if (name !== "get_task" && name !== "create_task") return diagnostic("capability_denied", "operation is not enabled for this Agent");
+  try {
+    return textResult(
+      name === "get_task" ? await getTask(input.entity_number) : await createTask(input),
+    );
+  }
   catch (error) {
     const code = error?.name === "AbortError" ? "timeout" : error?.message;
     const messages = {
@@ -203,6 +292,21 @@ async function call(name, input) {
 const definition = {
   description: "Read one Sfera Task by its entity number. This operation never changes Task data.",
   inputSchema: { type: "object", additionalProperties: false, required: ["entity_number"], properties: { entity_number: { type: "string", pattern: "^[A-Z][A-Z0-9]{1,31}-[1-9][0-9]{0,9}$" } } },
+};
+
+const createDefinition = {
+  description: "Create one ordinary Sfera Task in an existing area. This operation never creates a subtask or changes another Task.",
+  inputSchema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["area", "name", "description", "priority"],
+    properties: {
+      area: { type: "string", pattern: "^[A-Z][A-Z0-9]{1,31}$" },
+      name: { type: "string", minLength: 1, maxLength: 2000 },
+      description: { type: "string", maxLength: 16000 },
+      priority: { type: "string", enum: ["low", "average"] },
+    },
+  },
 };
 
 function reply(id, result) { process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`); }
@@ -224,7 +328,10 @@ function startStdioServer() {
         if (!object(request) || request.jsonrpc !== "2.0" || typeof request.method !== "string") return;
         const id = request.id;
         if (request.method === "initialize") return reply(id, { protocolVersion: request.params?.protocolVersion || "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "restricted-sfera-task", version: "1.0.0" } });
-        if (request.method === "tools/list") return reply(id, { tools: allowed.has("get_task") ? [{ name: "get_task", ...definition }] : [] });
+        if (request.method === "tools/list") return reply(id, { tools: [
+          ...(allowed.has("get_task") ? [{ name: "get_task", ...definition }] : []),
+          ...(allowed.has("create_task") ? [{ name: "create_task", ...createDefinition }] : []),
+        ] });
         if (request.method === "tools/call") return reply(id, await call(request.params?.name, request.params?.arguments));
         if (id !== undefined) error(id, -32601, "method not found");
       });

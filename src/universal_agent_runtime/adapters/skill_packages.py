@@ -20,10 +20,15 @@ _MANIFEST_FIELDS = {
     "tool_capabilities",
     "mutation_tool_capabilities",
 }
-_EXPLICIT_CONFIRMATION = re.compile(
-    r"\bexplicit(?:ly)?\s+confirm(?:ation|ed|ing)?\b|"
-    r"\bявно\s+подтвержда(?:ю|ем|ете|ет)\b",
+_EXPLICIT_CREATE_TASK_INTENT = re.compile(
+    r"(?:\bcreate\b.{0,120}\btask(?:s)?\b|"
+    r"\btask(?:s)?\b.{0,120}\bcreate\b|"
+    r"\bсозда(?:й|йте|ть|дим|йте)\w*.{0,120}\bзадач\w*\b|"
+    r"\bзадач\w*.{0,120}\bсозда(?:й|йте|ть|дим|йте)\w*\b)",
     re.IGNORECASE,
+)
+_NEGATED_CREATE_TASK_INTENT = re.compile(
+    r"(?:\bdo\s+not\s+create\b|\bне\s+созда\w*)", re.IGNORECASE
 )
 
 
@@ -61,7 +66,10 @@ class SkillPackage:
         effective = tuple(
             tool for tool in granted_tools if tool in self.tool_capabilities
         )
-        if _EXPLICIT_CONFIRMATION.search(current_message) is not None:
+        if (
+            _EXPLICIT_CREATE_TASK_INTENT.search(current_message) is not None
+            and _NEGATED_CREATE_TASK_INTENT.search(current_message) is None
+        ):
             return effective
         return tuple(
             tool for tool in effective if tool not in self.mutation_tool_capabilities

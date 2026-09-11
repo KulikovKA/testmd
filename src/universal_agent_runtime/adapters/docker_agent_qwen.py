@@ -86,7 +86,11 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
                     if any(operation in authorized for _, authorized in selected_skills)
                 )
             else:
-                task_operations = configured_operations
+                task_operations = tuple(
+                    operation
+                    for operation in configured_operations
+                    if operation != "create_task"
+                )
             invocation = replace(
                 invocation,
                 task_operations=task_operations,
@@ -206,7 +210,13 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
         return tuple(
             operation
             for operation in TASK_TOOL_OPERATIONS
-            if operation in values.get("UAR_AGENT_TOOL_CAPABILITIES", "").split(",")
+            if (
+                operation in values.get("UAR_AGENT_TOOL_CAPABILITIES", "").split(",")
+                and (
+                    operation != "create_task"
+                    or self._config.sfera_default_owner is not None
+                )
+            )
         )
 
     def _selected_skills(
@@ -241,6 +251,11 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
         if self._config.sfera_username is not None:
             result["UAR_SFERA_USERNAME"] = self._config.sfera_username
             result["UAR_SFERA_PASSWORD"] = self._config.sfera_password or ""
+        if (
+            "create_task" in operations
+            and self._config.sfera_default_owner is not None
+        ):
+            result["UAR_SFERA_DEFAULT_OWNER"] = self._config.sfera_default_owner
         if self._config.sfera_ca_cert_path is not None:
             result["NODE_EXTRA_CA_CERTS"] = (
                 self._config.sfera_ca_cert_container_path

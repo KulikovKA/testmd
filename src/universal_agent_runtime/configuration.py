@@ -169,6 +169,7 @@ class ApplicationSettings:
     sfera_username: str | None = field(default=None, repr=False)
     sfera_password_secret_id: str | None = None
     sfera_password: str | None = field(default=None, repr=False)
+    sfera_default_owner: str | None = None
     sfera_ca_cert_path: Path | None = None
     sfera_timeout_seconds: float = 10.0
     sfera_max_response_bytes: int = 65_536
@@ -225,6 +226,15 @@ class ApplicationSettings:
             raise ConfigurationError("Sfera configuration requires username and password")
         if self.sfera_ca_cert_path is not None and self.sfera_base_url is None:
             raise ConfigurationError("UAR_SFERA_CA_CERT_PATH requires UAR_SFERA_BASE_URL")
+        if self.sfera_default_owner is not None:
+            _identifier(
+                {"UAR_SFERA_DEFAULT_OWNER": self.sfera_default_owner},
+                "UAR_SFERA_DEFAULT_OWNER",
+            )
+            if self.sfera_base_url is None:
+                raise ConfigurationError(
+                    "UAR_SFERA_DEFAULT_OWNER requires UAR_SFERA_BASE_URL"
+                )
         if self.qwen_reasoning_directive not in {"/think", "/no_think"}:
             raise ConfigurationError(
                 "UAR_QWEN_REASONING_DIRECTIVE must be /think or /no_think"
@@ -292,6 +302,7 @@ class ApplicationSettings:
         sfera_username = values.get("UAR_SFERA_USERNAME", "")
         sfera_password_secret_id = values.get("UAR_SFERA_PASSWORD_SECRET_ID", "").strip()
         sfera_password = values.get("UAR_SFERA_PASSWORD", "")
+        sfera_default_owner = values.get("UAR_SFERA_DEFAULT_OWNER", "").strip()
         return cls(
             api_host=_required(values, "UAR_API_HOST"),
             api_port=_port(values, "UAR_API_PORT"),
@@ -340,6 +351,7 @@ class ApplicationSettings:
             sfera_username=sfera_username or None,
             sfera_password_secret_id=sfera_password_secret_id or None,
             sfera_password=sfera_password or None,
+            sfera_default_owner=sfera_default_owner or None,
             sfera_ca_cert_path=_optional_sfera_ca_cert_path(values),
             sfera_timeout_seconds=_positive_float(
                 {"UAR_SFERA_TIMEOUT_SECONDS": "10", **values},

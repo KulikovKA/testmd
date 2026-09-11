@@ -27,7 +27,11 @@ const task = {
 };
 
 class McpClient {
-  constructor(endpoint, { maxResponseBytes = "65536" } = {}) {
+  constructor(endpoint, {
+    maxResponseBytes = "65536",
+    capabilities = "get_task",
+    defaultOwner = "",
+  } = {}) {
     this.child = spawn(process.execPath, [serverPath], {
       env: {
         ...process.env,
@@ -36,7 +40,8 @@ class McpClient {
         UAR_SFERA_PASSWORD: secret,
         UAR_SFERA_TIMEOUT_MS: "1000",
         UAR_SFERA_MAX_RESPONSE_BYTES: maxResponseBytes,
-        UAR_AGENT_TOOL_CAPABILITIES: "get_task,create_task",
+        UAR_AGENT_TOOL_CAPABILITIES: capabilities,
+        ...(defaultOwner ? { UAR_SFERA_DEFAULT_OWNER: defaultOwner } : {}),
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -164,6 +169,141 @@ test("get_task logs in with exact JSON, retains all cookies, and exposes only ge
     assert.equal(calls[0].headers["content-type"], "application/json");
     assert.equal(calls[0].body, JSON.stringify({ username: "sfera-user", password: secret }));
   });
+});
+
+test("create_task is visible only with its capability and configured owner", async () => {
+  await withMcp(async (request, response) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    response.writeHead(500).end();
+  }, async (mcp) => {
+    const listed = await mcp.request("tools/list", {});
+    assert.deepEqual(listed.result.tools.map((tool) => tool.name), ["get_task"]);
+  }, { capabilities: "get_task,create_task" });
+
+  await withMcp(async (request, response) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    response.writeHead(500).end();
+  }, async (mcp) => {
+    const listed = await mcp.request("tools/list", {});
+    assert.deepEqual(listed.result.tools.map((tool) => tool.name), ["get_task", "create_task"]);
+  }, { capabilities: "get_task,create_task", defaultOwner: "sfera-admin" });
+});
+
+const createInput = {
+  area: "TTEST2",
+  name: "Новая задача",
+  description: "Первая строка\nВторая & строка",
+  priority: "average",
+};
+
+const createdTask = {
+  ...task,
+  id: "228",
+  number: "TTEST2-97",
+  name: createInput.name,
+  description: "<p>Первая строка<br>Вторая &amp; строка</p>",
+};
+
+test("create_task posts a fixed ordinary-Task payload and returns normalized data", async () => {
+  await withMcp(async (request, response) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    assert.equal(request.method, "POST");
+    assert.equal(request.url, "/app/tasks/api/v1/entities");
+    assert.match(request.headers.cookie, /SESSION=one/);
+    assert.deepEqual(JSON.parse(request.body), {
+      area: "TTEST2",
+      description: "<p>Первая строка<br>Вторая &amp; строка</p>",
+      name: "Новая задача",
+      owner: "sfera-admin",
+      priority: "average",
+      status: "created",
+      type: "task",
+    });
+    response.writeHead(201, { "content-type": "application/json" });
+    response.end(JSON.stringify(createdTask));
+  }, async (mcp, calls) => {
+    const response = await mcp.request("tools/call", { name: "create_task", arguments: createInput });
+    const payload = result(response);
+    assert.equal(payload.numeric_id, 228);
+    assert.equal(payload.number, "TTEST2-97");
+    assert.equal(payload.title, "Новая задача");
+    assert.equal(payload.children, undefined);
+    assert.equal(calls.filter((call) => call.path === "/app/ppau/api/auth/login").length, 1);
+  }, { capabilities: "get_task,create_task", defaultOwner: "sfera-admin" });
+});
+
+test("create_task normalizes a numeric Sfera id", async () => {
+  await withMcp(async (request, response) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    response.writeHead(201, { "content-type": "application/json" });
+    response.end(JSON.stringify({ ...createdTask, id: 229, number: "TTEST2-98" }));
+  }, async (mcp) => {
+    const response = await mcp.request("tools/call", { name: "create_task", arguments: createInput });
+    assert.equal(result(response).numeric_id, 229);
+  }, { capabilities: "create_task", defaultOwner: "sfera-admin" });
+});
+
+for (const [name, argumentsValue] of [
+  ["invalid area", { ...createInput, area: "https://untrusted" }],
+  ["empty name", { ...createInput, name: "" }],
+  ["raw HTML", { ...createInput, description: "<b>unsafe</b>" }],
+  ["invalid priority", { ...createInput, priority: "high" }],
+  ["LLM owner", { ...createInput, owner: "untrusted" }],
+]) {
+  test(`create_task rejects ${name} before a request`, async () => {
+    await withMcp(async (_request, response) => response.writeHead(500).end(), async (mcp, calls) => {
+      const response = await mcp.request("tools/call", { name: "create_task", arguments: argumentsValue });
+      assert.equal(result(response).error.code, "invalid_input");
+      assert.equal(calls.length, 0);
+    }, { capabilities: "create_task", defaultOwner: "sfera-admin" });
+  });
+}
+
+test("create_task retries a 401 once with a fresh login", async () => {
+  let creates = 0;
+  await withMcp(async (request, response, calls) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response, String(calls.length));
+    creates += 1;
+    if (creates === 1) return response.writeHead(401).end("{}");
+    response.writeHead(201, { "content-type": "application/json" });
+    response.end(JSON.stringify(createdTask));
+  }, async (mcp, calls) => {
+    const response = await mcp.request("tools/call", { name: "create_task", arguments: createInput });
+    assert.equal(response.result.isError, undefined);
+    assert.equal(creates, 2);
+    assert.equal(calls.filter((call) => call.path === "/app/ppau/api/auth/login").length, 2);
+  }, { capabilities: "create_task", defaultOwner: "sfera-admin" });
+});
+
+for (const [name, status, body, code] of [
+  ["forbidden", 403, "{}", "authentication_failed"],
+  ["timeout response", 408, "{}", "timeout"],
+  ["unexpected status", 200, "{}", "service_failure"],
+  ["malformed JSON", 201, "not-json", "invalid_schema"],
+  ["invalid schema", 201, JSON.stringify({ ...createdTask, id: "bad" }), "invalid_schema"],
+]) {
+  test(`create_task handles ${name} safely`, async () => {
+    await withMcp(async (request, response) => {
+      if (request.url === "/app/ppau/api/auth/login") return login(response);
+      response.writeHead(status, { "content-type": "application/json" });
+      response.end(body);
+    }, async (mcp) => {
+      const response = await mcp.request("tools/call", { name: "create_task", arguments: createInput });
+      assert.equal(result(response).error.code, code);
+      assert.doesNotMatch(JSON.stringify(response), new RegExp(secret));
+    }, { capabilities: "create_task", defaultOwner: "sfera-admin" });
+  });
+}
+
+test("create_task enforces the configured response-size limit", async () => {
+  await withMcp(async (request, response) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    response.writeHead(201, { "content-type": "application/json" });
+    response.end(JSON.stringify({ ...createdTask, description: "x".repeat(2000) }));
+  }, async (mcp) => {
+    const response = await mcp.request("tools/call", { name: "create_task", arguments: createInput });
+    assert.equal(result(response).error.code, "response_limit");
+  }, { maxResponseBytes: "1024", capabilities: "create_task", defaultOwner: "sfera-admin" });
 });
 
 for (const [sourceId, normalizedId] of [["225", 225], ["000225", 225], [225, 225], ["9007199254740992", "9007199254740992"]]) {
