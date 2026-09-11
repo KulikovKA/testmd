@@ -51,22 +51,11 @@ _TASK_SYSTEM_PROMPT = (
     "Use facts from the prior conversation when needed. Never repeat an earlier "
     "assistant reply unless CURRENT_USER_MESSAGE explicitly asks for it. Use only "
     "a discovered Task tool when it is necessary to answer the current request. "
-    "If the current request explicitly authorizes a Task creation or update and "
-    "the matching tool is available, you must call that tool; a text-only "
-    "simulation is invalid. Never claim that a mutation succeeded without a "
-    "successful Tool result. Never invent a URL, HTTP method, headers, or a tool "
-    "name. After a Task mutation succeeds, copy the returned id, title, parent_id, "
-    "and subtask_ids values into the final answer exactly; never substitute or "
-    "infer them."
+    "The available Task tool is read-only. Never claim that a Task was changed, "
+    "never invent a URL, HTTP method, headers, or a tool name, and never simulate "
+    "an unavailable mutation."
 )
-TASK_TOOL_OPERATIONS = (
-    "get_task",
-    "create_task",
-    "create_subtask",
-    "update_task",
-)
-TASK_MUTATION_OPERATIONS = ("create_task", "create_subtask", "update_task")
-TASK_RESULT_LOG_PATH = "/workspace/.uar-tools/task-results.jsonl"
+TASK_TOOL_OPERATIONS = ("get_task",)
 
 
 @dataclass(frozen=True)
@@ -84,10 +73,11 @@ class QwenSessionConfig:
     max_history_characters: int = 65_536
     max_transcript_bytes: int = 8 * 1024 * 1024
     image: str = QWEN_IMAGE
-    task_api_base_url: str | None = None
-    task_api_token: str | None = field(default=None, repr=False)
-    task_api_timeout_seconds: float = 10.0
-    task_api_max_response_bytes: int = 65_536
+    sfera_base_url: str | None = None
+    sfera_username: str | None = field(default=None, repr=False)
+    sfera_password: str | None = field(default=None, repr=False)
+    sfera_timeout_seconds: float = 10.0
+    sfera_max_response_bytes: int = 65_536
     task_mcp_server_path: str = "/workspace/.uar-tools/task_rest_mcp_server.mjs"
     task_mcp_config_path: str = "/root/.qwen/task-mcp-config.json"
     reasoning_directive: str = "/think"
@@ -125,27 +115,33 @@ class QwenSessionConfig:
                 raise ValueError(f"{label} must be an integer of at least {minimum}")
         if not self.image:
             raise ValueError("image is required")
-        if self.task_api_base_url is not None:
-            task_url = urlparse(self.task_api_base_url)
+        if self.sfera_base_url is not None:
+            task_url = urlparse(self.sfera_base_url)
             if (
                 task_url.scheme not in {"http", "https"}
                 or not task_url.hostname
                 or task_url.username is not None
                 or task_url.password is not None
+                or task_url.path.rstrip("/")
                 or task_url.query
                 or task_url.fragment
             ):
-                raise ValueError("task_api_base_url must be an HTTP(S) origin")
-        if self.task_api_token is not None and (
-            not self.task_api_token or "\x00" in self.task_api_token
+                raise ValueError("sfera_base_url must be an HTTP(S) origin")
+        if (self.sfera_username is None) != (self.sfera_password is None):
+            raise ValueError("Sfera username and password must be configured together")
+        if self.sfera_base_url is not None and not self.sfera_username:
+            raise ValueError("Sfera configuration requires username and password")
+        if any(
+            value is not None and (not value or "\x00" in value)
+            for value in (self.sfera_username, self.sfera_password)
         ):
-            raise ValueError("task_api_token is invalid")
+            raise ValueError("Sfera credentials are invalid")
         if (
-            isinstance(self.task_api_timeout_seconds, bool)
-            or not isinstance(self.task_api_timeout_seconds, (int, float))
-            or self.task_api_timeout_seconds <= 0
-            or type(self.task_api_max_response_bytes) is not int
-            or not 1_024 <= self.task_api_max_response_bytes <= 1_048_576
+            isinstance(self.sfera_timeout_seconds, bool)
+            or not isinstance(self.sfera_timeout_seconds, (int, float))
+            or self.sfera_timeout_seconds <= 0
+            or type(self.sfera_max_response_bytes) is not int
+            or not 1_024 <= self.sfera_max_response_bytes <= 1_048_576
             or not self.task_mcp_server_path.startswith("/")
             or "\x00" in self.task_mcp_server_path
             or not self.task_mcp_config_path.startswith("/")
@@ -261,32 +257,27 @@ class DockerQwenCommandRunner:
     def run(self, invocation: QwenInvocation) -> QwenExecution:
         command = self.command(invocation)
         container = None
-        result_log = invocation.workspace / ".uar-tools" / "task-results.jsonl"
         try:
-            try:
-                result_log.unlink(missing_ok=True)
-            except OSError:
-                raise QwenRunnerFailure(QwenRunnerErrorCode.OPERATION_FAILED) from None
             environment = {
                 "OLLAMA_API_KEY": self._config.api_key,
                 "OPENAI_API_KEY": self._config.api_key,
                 "UAR_AGENT_TOOL_CAPABILITIES": ",".join(invocation.task_operations),
-                "UAR_TASK_RESULT_LOG": TASK_RESULT_LOG_PATH,
             }
-            if self._config.task_api_base_url is not None:
+            if invocation.task_operations and self._config.sfera_base_url is not None:
                 environment.update(
                     {
-                        "UAR_TASK_API_BASE_URL": self._config.task_api_base_url,
-                        "UAR_TASK_API_TIMEOUT_MS": str(
-                            round(self._config.task_api_timeout_seconds * 1000)
+                        "UAR_SFERA_BASE_URL": self._config.sfera_base_url,
+                        "UAR_SFERA_TIMEOUT_MS": str(
+                            round(self._config.sfera_timeout_seconds * 1000)
                         ),
-                        "UAR_TASK_API_MAX_RESPONSE_BYTES": str(
-                            self._config.task_api_max_response_bytes
+                        "UAR_SFERA_MAX_RESPONSE_BYTES": str(
+                            self._config.sfera_max_response_bytes
                         ),
                     }
                 )
-            if self._config.task_api_token is not None:
-                environment["UAR_TASK_API_TOKEN"] = self._config.task_api_token
+            if invocation.task_operations and self._config.sfera_username is not None:
+                environment["UAR_SFERA_USERNAME"] = self._config.sfera_username
+                environment["UAR_SFERA_PASSWORD"] = self._config.sfera_password or ""
             container = self._client.containers.run(
                 self._config.image,
                 command,
@@ -313,13 +304,7 @@ class DockerQwenCommandRunner:
                 raise QwenRunnerFailure(QwenRunnerErrorCode.TIMEOUT)
             if status != 0:
                 raise QwenRunnerFailure(_classify_runner_output(output))
-            execution = _parse_qwen_output(output, invocation.native_session_id)
-            return _append_task_results(
-                execution,
-                result_log.read_bytes() if result_log.is_file() else b"",
-                invocation.task_operations,
-                self._config.task_api_max_response_bytes,
-            )
+            return _parse_qwen_output(output, invocation.native_session_id)
         except QwenRunnerFailure:
             raise
         except (
@@ -332,10 +317,6 @@ class DockerQwenCommandRunner:
         ):
             raise QwenRunnerFailure(QwenRunnerErrorCode.OPERATION_FAILED) from None
         finally:
-            try:
-                result_log.unlink(missing_ok=True)
-            except OSError:
-                pass
             if container is not None:
                 try:
                     container.remove(force=True)
@@ -407,91 +388,6 @@ def _parse_qwen_output(output: str, expected: UUID) -> QwenExecution:
     if response.lstrip().startswith("[API Error:"):
         raise QwenRunnerFailure(QwenRunnerErrorCode.INFERENCE_UNAVAILABLE)
     return QwenExecution(actual, response)
-
-
-def _append_task_results(
-    execution: QwenExecution,
-    raw: bytes,
-    allowed_operations: tuple[str, ...],
-    max_response_bytes: int,
-) -> QwenExecution:
-    if not raw:
-        return execution
-    if len(raw) > max_response_bytes * 4:
-        raise QwenRunnerFailure(QwenRunnerErrorCode.PROTOCOL_FAILURE)
-    records: list[dict[str, Any]] = []
-    try:
-        lines = raw.decode("utf-8").splitlines()
-        if not 1 <= len(lines) <= 4:
-            raise ValueError
-        for line in lines:
-            entry = json.loads(line)
-            if (
-                not isinstance(entry, dict)
-                or set(entry) != {"operation", "task"}
-                or entry["operation"] not in TASK_MUTATION_OPERATIONS
-                or entry["operation"] not in allowed_operations
-                or not _valid_task_record(entry["task"])
-            ):
-                raise ValueError
-            records.append(entry)
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
-        raise QwenRunnerFailure(QwenRunnerErrorCode.PROTOCOL_FAILURE) from None
-    rendered = "\n".join(
-        json.dumps(record, ensure_ascii=False, separators=(",", ":"))
-        for record in records
-    )
-    return replace(
-        execution,
-        response=f"{execution.response.rstrip()}\n\nVerified Task records:\n{rendered}",
-    )
-
-
-def _valid_task_record(value: object) -> bool:
-    if not isinstance(value, dict) or set(value) != {
-        "id",
-        "title",
-        "description",
-        "status",
-        "parent_id",
-        "subtask_ids",
-        "version",
-    }:
-        return False
-    task_id = value["id"]
-    parent_id = value["parent_id"]
-    subtask_ids = value["subtask_ids"]
-    return (
-        isinstance(task_id, str)
-        and task_id.startswith("task-")
-        and task_id[5:].isdigit()
-        and len(task_id) >= 9
-        and isinstance(value["title"], str)
-        and 1 <= len(value["title"]) <= 200
-        and isinstance(value["description"], str)
-        and len(value["description"]) <= 4_000
-        and isinstance(value["status"], str)
-        and value["status"] in {"open", "in_progress", "done", "cancelled"}
-        and (
-            parent_id is None
-            or (
-                isinstance(parent_id, str)
-                and parent_id.startswith("task-")
-                and parent_id[5:].isdigit()
-                and len(parent_id) >= 9
-            )
-        )
-        and isinstance(subtask_ids, list)
-        and all(
-            isinstance(identifier, str)
-            and identifier.startswith("task-")
-            and identifier[5:].isdigit()
-            and len(identifier) >= 9
-            for identifier in subtask_ids
-        )
-        and type(value["version"]) is int
-        and value["version"] >= 1
-    )
 
 
 class QwenSessionAdapter:
@@ -569,13 +465,13 @@ class QwenSessionAdapter:
             "telemetry": {"enabled": False},
             "general": {"chatRecording": True},
         }
-        if self._config.task_api_base_url is not None:
+        if self._config.sfera_base_url is not None:
             mcp_server = {
                 "command": "node",
                 "args": [self._config.task_mcp_server_path],
-                "includeTools": list(TASK_TOOL_OPERATIONS),
+                "includeTools": ["get_task"],
                 "trust": True,
-                "timeout": round(self._config.task_api_timeout_seconds * 1000),
+                "timeout": round(self._config.sfera_timeout_seconds * 1000),
             }
             settings["mcp"] = {"allowed": ["task-rest"]}
             settings["mcpServers"] = {"task-rest": mcp_server}
@@ -596,7 +492,7 @@ class QwenSessionAdapter:
         )
 
     def _write_task_mcp_server(self, reference: SessionReference) -> None:
-        if self._config.task_api_base_url is None:
+        if self._config.sfera_base_url is None:
             return
         source = Path(__file__).with_name("task_rest_mcp_server.mjs")
         target = self._task_mcp_server(reference)
@@ -928,7 +824,11 @@ class QwenSessionAdapter:
     def _secret_values(self) -> tuple[str, ...]:
         return tuple(
             value
-            for value in (self._config.api_key, self._config.task_api_token)
+            for value in (
+                self._config.api_key,
+                self._config.sfera_username,
+                self._config.sfera_password,
+            )
             if value
         )
 

@@ -90,8 +90,8 @@ def _command(environment: Mapping[str, str]) -> tuple[str, ...]:
     return tuple(decoded)
 
 
-def _optional_task_endpoint(environment: Mapping[str, str]) -> str | None:
-    value = environment.get("UAR_TASK_API_BASE_URL", "").strip()
+def _optional_sfera_endpoint(environment: Mapping[str, str]) -> str | None:
+    value = environment.get("UAR_SFERA_BASE_URL", "").strip()
     if not value:
         return None
     parsed = urlparse(value)
@@ -100,10 +100,11 @@ def _optional_task_endpoint(environment: Mapping[str, str]) -> str | None:
         or not parsed.hostname
         or parsed.username is not None
         or parsed.password is not None
+        or parsed.path.rstrip("/")
         or parsed.query
         or parsed.fragment
     ):
-        raise ConfigurationError("UAR_TASK_API_BASE_URL must be an HTTP(S) origin")
+        raise ConfigurationError("UAR_SFERA_BASE_URL must be an HTTP(S) origin")
     return value.rstrip("/")
 
 
@@ -137,11 +138,13 @@ class ApplicationSettings:
     qwen_api_key_secret_id: str
     qwen_api_key: str = field(repr=False)
     qwen_reasoning_directive: str = "/think"
-    task_api_base_url: str | None = None
-    task_api_token_secret_id: str | None = None
-    task_api_token: str | None = field(default=None, repr=False)
-    task_api_timeout_seconds: float = 10.0
-    task_api_max_response_bytes: int = 65_536
+    sfera_base_url: str | None = None
+    sfera_username_secret_id: str | None = None
+    sfera_username: str | None = field(default=None, repr=False)
+    sfera_password_secret_id: str | None = None
+    sfera_password: str | None = field(default=None, repr=False)
+    sfera_timeout_seconds: float = 10.0
+    sfera_max_response_bytes: int = 65_536
     chat_max_message_characters: int = 16_384
     chat_max_response_characters: int = 16_384
     chat_max_history_messages: int = 100
@@ -171,37 +174,62 @@ class ApplicationSettings:
             or self.chat_max_history_messages < 2
         ):
             raise ConfigurationError("invalid chat limits")
-        if self.task_api_base_url is not None:
-            _optional_task_endpoint({"UAR_TASK_API_BASE_URL": self.task_api_base_url})
-        if (self.task_api_token_secret_id is None) != (self.task_api_token is None):
+        if self.sfera_base_url is not None:
+            _optional_sfera_endpoint({"UAR_SFERA_BASE_URL": self.sfera_base_url})
+        sfera_credentials = (
+            self.sfera_username_secret_id,
+            self.sfera_username,
+            self.sfera_password_secret_id,
+            self.sfera_password,
+        )
+        if any(value is not None for value in sfera_credentials) and any(
+            value is None for value in sfera_credentials
+        ):
             raise ConfigurationError(
-                "Task API token ID and value must be configured together"
+                "Sfera username/password IDs and values must be configured together"
             )
+        if self.sfera_base_url is None and any(
+            value is not None for value in sfera_credentials
+        ):
+            raise ConfigurationError("Sfera credentials require UAR_SFERA_BASE_URL")
+        if self.sfera_base_url is not None and any(
+            value is None for value in sfera_credentials
+        ):
+            raise ConfigurationError("Sfera configuration requires username and password")
         if self.qwen_reasoning_directive not in {"/think", "/no_think"}:
             raise ConfigurationError(
                 "UAR_QWEN_REASONING_DIRECTIVE must be /think or /no_think"
             )
-        if self.task_api_token_secret_id is not None:
+        if self.sfera_username_secret_id is not None:
             _identifier(
-                {"UAR_TASK_API_TOKEN_SECRET_ID": self.task_api_token_secret_id},
-                "UAR_TASK_API_TOKEN_SECRET_ID",
+                {"UAR_SFERA_USERNAME_SECRET_ID": self.sfera_username_secret_id},
+                "UAR_SFERA_USERNAME_SECRET_ID",
             )
-            if not self.task_api_token or "\x00" in self.task_api_token:
-                raise ConfigurationError("UAR_TASK_API_TOKEN is invalid")
+            _identifier(
+                {"UAR_SFERA_PASSWORD_SECRET_ID": self.sfera_password_secret_id or ""},
+                "UAR_SFERA_PASSWORD_SECRET_ID",
+            )
+            if (
+                not self.sfera_username
+                or not self.sfera_password
+                or "\x00" in self.sfera_username
+                or "\x00" in self.sfera_password
+            ):
+                raise ConfigurationError("Sfera credentials are invalid")
         if (
-            type(self.task_api_max_response_bytes) is not int
-            or not 1_024 <= self.task_api_max_response_bytes <= 1_048_576
+            type(self.sfera_max_response_bytes) is not int
+            or not 1_024 <= self.sfera_max_response_bytes <= 1_048_576
         ):
             raise ConfigurationError(
-                "UAR_TASK_API_MAX_RESPONSE_BYTES must be in 1024..1048576"
+                "UAR_SFERA_MAX_RESPONSE_BYTES must be in 1024..1048576"
             )
         if (
-            isinstance(self.task_api_timeout_seconds, bool)
-            or not isinstance(self.task_api_timeout_seconds, (int, float))
-            or not math.isfinite(self.task_api_timeout_seconds)
-            or self.task_api_timeout_seconds <= 0
+            isinstance(self.sfera_timeout_seconds, bool)
+            or not isinstance(self.sfera_timeout_seconds, (int, float))
+            or not math.isfinite(self.sfera_timeout_seconds)
+            or self.sfera_timeout_seconds <= 0
         ):
-            raise ConfigurationError("UAR_TASK_API_TIMEOUT_SECONDS must be positive")
+            raise ConfigurationError("UAR_SFERA_TIMEOUT_SECONDS must be positive")
 
     @classmethod
     def from_environment(
@@ -231,12 +259,10 @@ class ApplicationSettings:
             raise ConfigurationError(
                 "UAR_QWEN_SESSION_STORAGE_ROOT must not be a filesystem root"
             )
-        task_token_secret_id = values.get("UAR_TASK_API_TOKEN_SECRET_ID", "").strip()
-        task_token = values.get("UAR_TASK_API_TOKEN", "")
-        if bool(task_token_secret_id) != bool(task_token):
-            raise ConfigurationError(
-                "Task API token ID and value must be configured together"
-            )
+        sfera_username_secret_id = values.get("UAR_SFERA_USERNAME_SECRET_ID", "").strip()
+        sfera_username = values.get("UAR_SFERA_USERNAME", "")
+        sfera_password_secret_id = values.get("UAR_SFERA_PASSWORD_SECRET_ID", "").strip()
+        sfera_password = values.get("UAR_SFERA_PASSWORD", "")
         return cls(
             api_host=_required(values, "UAR_API_HOST"),
             api_port=_port(values, "UAR_API_PORT"),
@@ -280,16 +306,18 @@ class ApplicationSettings:
             qwen_reasoning_directive=values.get(
                 "UAR_QWEN_REASONING_DIRECTIVE", "/think"
             ),
-            task_api_base_url=_optional_task_endpoint(values),
-            task_api_token_secret_id=task_token_secret_id or None,
-            task_api_token=task_token or None,
-            task_api_timeout_seconds=_positive_float(
-                {"UAR_TASK_API_TIMEOUT_SECONDS": "10", **values},
-                "UAR_TASK_API_TIMEOUT_SECONDS",
+            sfera_base_url=_optional_sfera_endpoint(values),
+            sfera_username_secret_id=sfera_username_secret_id or None,
+            sfera_username=sfera_username or None,
+            sfera_password_secret_id=sfera_password_secret_id or None,
+            sfera_password=sfera_password or None,
+            sfera_timeout_seconds=_positive_float(
+                {"UAR_SFERA_TIMEOUT_SECONDS": "10", **values},
+                "UAR_SFERA_TIMEOUT_SECONDS",
             ),
-            task_api_max_response_bytes=_positive_int(
-                {"UAR_TASK_API_MAX_RESPONSE_BYTES": "65536", **values},
-                "UAR_TASK_API_MAX_RESPONSE_BYTES",
+            sfera_max_response_bytes=_positive_int(
+                {"UAR_SFERA_MAX_RESPONSE_BYTES": "65536", **values},
+                "UAR_SFERA_MAX_RESPONSE_BYTES",
             ),
             stream_heartbeat_seconds=_positive_float(
                 {"UAR_STREAM_HEARTBEAT_SECONDS": "15", **values},

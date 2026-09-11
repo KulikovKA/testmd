@@ -12,7 +12,7 @@ Orchestrator.
       -> Docker Runtime
         -> Qwen Code
           -> внешний Ollama
-          -> ограниченный Task REST Tool
+          -> ограниченный read-only Sfera Task Tool
 ```
 
 UI не подключается к Ollama напрямую и не обходит жизненный цикл Agent, Skill
@@ -23,7 +23,7 @@ UI не подключается к Ollama напрямую и не обходи
 - проверка health/readiness Orchestrator;
 - создание Agent;
 - выбор `task-decomposition`;
-- выбор `get_task`, `create_task`, `create_subtask`, `update_task`;
+- выбор `get_task` для чтения задачи Sfera;
 - запуск, остановка, просмотр и удаление Agent;
 - постоянный JSON-чат;
 - загрузка history;

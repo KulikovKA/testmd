@@ -1,18 +1,9 @@
 {
   "schema_version": 1,
   "id": "task-decomposition",
-  "version": "1.0.0",
-  "summary": "Propose, revise, confirm, and create a task decomposition through restricted Task tools.",
+  "version": "1.1.0",
+  "summary": "Propose and revise a task decomposition, with optional read-only Task context.",
   "instruction_file": "SKILL.md",
-  "tool_capabilities": [
-    "get_task",
-    "create_task",
-    "create_subtask",
-    "update_task"
-  ],
-  "mutation_tool_capabilities": [
-    "create_task",
-    "create_subtask",
-    "update_task"
-  ]
+  "tool_capabilities": ["get_task"],
+  "mutation_tool_capabilities": []
 }

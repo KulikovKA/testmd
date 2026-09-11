@@ -96,7 +96,11 @@ def compose_application(
             max_history_page_size=settings.chat_max_history_page_size,
             redacted_values=tuple(
                 value
-                for value in (settings.qwen_api_key, settings.task_api_token)
+                for value in (
+                    settings.qwen_api_key,
+                    settings.sfera_username,
+                    settings.sfera_password,
+                )
                 if value
             ),
         ),
@@ -114,8 +118,8 @@ def _network_destinations(
     destinations = [
         NetworkDestination(settings.docker_network_host, settings.docker_network_port)
     ]
-    if settings.task_api_base_url is not None:
-        parsed = urlparse(settings.task_api_base_url)
+    if settings.sfera_base_url is not None:
+        parsed = urlparse(settings.sfera_base_url)
         assert parsed.hostname is not None
         destinations.append(
             NetworkDestination(
@@ -155,11 +159,6 @@ def _compose_runtime(settings: ApplicationSettings) -> AgentRuntime:
     def resolve_secret(secret_id: str) -> str:
         if secret_id == settings.qwen_api_key_secret_id:
             return settings.qwen_api_key
-        if (
-            secret_id == settings.task_api_token_secret_id
-            and settings.task_api_token is not None
-        ):
-            return settings.task_api_token
         raise KeyError("unknown secret reference")
 
     return DockerRuntime(
@@ -174,10 +173,11 @@ def _compose_interaction(settings: ApplicationSettings) -> AgentInteraction:
         model=settings.qwen_model,
         api_key=settings.qwen_api_key,
         reasoning_directive=settings.qwen_reasoning_directive,
-        task_api_base_url=settings.task_api_base_url,
-        task_api_token=settings.task_api_token,
-        task_api_timeout_seconds=settings.task_api_timeout_seconds,
-        task_api_max_response_bytes=settings.task_api_max_response_bytes,
+        sfera_base_url=settings.sfera_base_url,
+        sfera_username=settings.sfera_username,
+        sfera_password=settings.sfera_password,
+        sfera_timeout_seconds=settings.sfera_timeout_seconds,
+        sfera_max_response_bytes=settings.sfera_max_response_bytes,
         task_mcp_server_path=(
             f"{settings.docker_workspace_target}/.uar-tools/task_rest_mcp_server.mjs"
         ),
@@ -218,13 +218,6 @@ def _compose_lifecycle(
                 binding
                 for binding in (
                     SecretBinding("OPENAI_API_KEY", settings.qwen_api_key_secret_id),
-                    (
-                        SecretBinding(
-                            "UAR_TASK_API_TOKEN", settings.task_api_token_secret_id
-                        )
-                        if settings.task_api_token_secret_id is not None
-                        else None
-                    ),
                 )
                 if binding is not None
             ),

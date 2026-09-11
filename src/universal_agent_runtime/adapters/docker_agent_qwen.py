@@ -9,14 +9,12 @@ from typing import Any
 from docker.errors import DockerException
 
 from universal_agent_runtime.adapters.qwen_session import (
-    TASK_RESULT_LOG_PATH,
     TASK_TOOL_OPERATIONS,
     DockerQwenCommandRunner,
     QwenExecution,
     QwenInvocation,
     QwenRunnerFailure,
     QwenSessionConfig,
-    _append_task_results,
     _classify_runner_output,
     _parse_qwen_output,
 )
@@ -162,16 +160,6 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
                         bundle.addfile(info)
             if not container.put_archive(self._workspace_target, archive.getvalue()):
                 raise QwenRunnerFailure(Code.OPERATION_FAILED)
-            cleared_results = container.exec_run(
-                [
-                    "node",
-                    "-e",
-                    "const fs=require('fs');fs.rmSync(process.argv[1],{force:true});",
-                    TASK_RESULT_LOG_PATH,
-                ]
-            )
-            if cleared_results.exit_code != 0:
-                raise QwenRunnerFailure(Code.OPERATION_FAILED)
             outcome = container.exec_run(
                 self.command(invocation),
                 workdir=self._workspace_target,
@@ -181,8 +169,7 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
                     "OLLAMA_API_KEY": self._config.api_key,
                     "OPENAI_API_KEY": self._config.api_key,
                     "UAR_AGENT_TOOL_CAPABILITIES": ",".join(invocation.task_operations),
-                    "UAR_TASK_RESULT_LOG": TASK_RESULT_LOG_PATH,
-                    **self._task_environment(),
+                    **self._task_environment(invocation.task_operations),
                 },
             )
             if not isinstance(outcome.output, bytes):
@@ -193,12 +180,6 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
             if outcome.exit_code != 0:
                 raise QwenRunnerFailure(_classify_runner_output(output))
             execution = _parse_qwen_output(output, invocation.native_session_id)
-            execution = _append_task_results(
-                execution,
-                self._read_task_results(container),
-                invocation.task_operations,
-                self._config.task_api_max_response_bytes,
-            )
             chunks, _ = container.get_archive(home)
             self._receive(invocation, chunks)
             return execution
@@ -206,26 +187,6 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
             raise
         except (DockerException, OSError, ValueError, tarfile.TarError):
             raise QwenRunnerFailure(Code.OPERATION_FAILED) from None
-
-    def _read_task_results(self, container: Any) -> bytes:
-        limit = self._config.task_api_max_response_bytes * 4
-        outcome = container.exec_run(
-            [
-                "node",
-                "-e",
-                (
-                    "const fs=require('fs'),p=process.argv[1],m=Number(process.argv[2]);"
-                    "try{const b=fs.readFileSync(p);fs.rmSync(p,{force:true});"
-                    "if(b.length>m)process.exit(65);process.stdout.write(b)}"
-                    "catch(e){if(e.code!=='ENOENT')process.exit(66)}"
-                ),
-                TASK_RESULT_LOG_PATH,
-                str(limit),
-            ]
-        )
-        if outcome.exit_code != 0 or not isinstance(outcome.output, bytes):
-            raise QwenRunnerFailure(Code.PROTOCOL_FAILURE)
-        return outcome.output
 
     def _environment_values(self, container: object) -> dict[str, str]:
         environment = getattr(container, "attrs", {}).get("Config", {}).get("Env", [])
@@ -238,7 +199,7 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
         }
 
     def _task_operations(self, container: object) -> tuple[str, ...]:
-        if self._config.task_api_base_url is None:
+        if self._config.sfera_base_url is None:
             return ()
         values = self._environment_values(container)
         return tuple(
@@ -264,20 +225,21 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
             else task_operations,
         )
 
-    def _task_environment(self) -> dict[str, str]:
-        if self._config.task_api_base_url is None:
+    def _task_environment(self, operations: tuple[str, ...]) -> dict[str, str]:
+        if not operations or self._config.sfera_base_url is None:
             return {}
         result = {
-            "UAR_TASK_API_BASE_URL": self._config.task_api_base_url,
-            "UAR_TASK_API_TIMEOUT_MS": str(
-                round(self._config.task_api_timeout_seconds * 1000)
+            "UAR_SFERA_BASE_URL": self._config.sfera_base_url,
+            "UAR_SFERA_TIMEOUT_MS": str(
+                round(self._config.sfera_timeout_seconds * 1000)
             ),
-            "UAR_TASK_API_MAX_RESPONSE_BYTES": str(
-                self._config.task_api_max_response_bytes
+            "UAR_SFERA_MAX_RESPONSE_BYTES": str(
+                self._config.sfera_max_response_bytes
             ),
         }
-        if self._config.task_api_token is not None:
-            result["UAR_TASK_API_TOKEN"] = self._config.task_api_token
+        if self._config.sfera_username is not None:
+            result["UAR_SFERA_USERNAME"] = self._config.sfera_username
+            result["UAR_SFERA_PASSWORD"] = self._config.sfera_password or ""
         return result
 
     def _receive(self, invocation: QwenInvocation, chunks: object) -> None:

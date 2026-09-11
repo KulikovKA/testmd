@@ -1,5 +1,6 @@
 """FastAPI boundary for the Agent Orchestrator lifecycle API."""
 
+import json
 import re
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -12,6 +13,14 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from universal_agent_runtime.ag_ui import (
+    AGUIEventResponse,
+    ag_ui_error_events,
+    ag_ui_events,
+    begin_run,
+    parse_run_input,
+    safe_failure,
+)
 from universal_agent_runtime.application.agent_lifecycle import (
     AgentLifecycleErrorCode,
     AgentLifecycleFailure,
@@ -470,6 +479,72 @@ def create_application(composition: ApplicationComposition) -> FastAPI:
             turn,
             heartbeat_seconds=settings.stream_heartbeat_seconds,
             send_timeout_seconds=settings.stream_send_timeout_seconds,
+        )
+
+    @app.post(
+        "/ag-ui/agents/{agent_id}/run",
+        status_code=200,
+        response_class=AGUIEventResponse,
+        responses={
+            200: {
+                "description": "AG-UI SSE run lifecycle. The response is buffered until the existing Agent turn commits.",
+                "content": {"text/event-stream": {"schema": {"type": "string"}}},
+            }
+        },
+        openapi_extra={
+            "x-ag-ui-events": [
+                "RUN_STARTED",
+                "TEXT_MESSAGE_START",
+                "TEXT_MESSAGE_CONTENT",
+                "TEXT_MESSAGE_END",
+                "RUN_FINISHED",
+                "RUN_ERROR",
+            ]
+        },
+    )
+    async def run_ag_ui_agent(agent_id: AgentPath, request: Request) -> Response:
+        """Expose one existing Agent turn through the AG-UI run/event contract."""
+
+        try:
+            raw = await request.json()
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return AGUIEventResponse(
+                ag_ui_error_events(
+                    thread_id=None,
+                    run_id=None,
+                    code="request_invalid",
+                    message="Run input validation failed",
+                )
+            )
+        input, thread_id, run_id = parse_run_input(raw)
+        if input is None:
+            return AGUIEventResponse(
+                ag_ui_error_events(
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    code="request_invalid",
+                    message="Run input validation failed",
+                )
+            )
+        try:
+            turn = begin_run(chat, agent_id, input)
+        except AgentLifecycleFailure as failure:
+            code, message = safe_failure(failure)
+            return AGUIEventResponse(
+                ag_ui_error_events(
+                    thread_id=input.threadId,
+                    run_id=input.runId,
+                    code=code,
+                    message=message,
+                )
+            )
+        return AGUIEventResponse(
+            ag_ui_events(
+                turn,
+                thread_id=input.threadId,
+                run_id=input.runId,
+                heartbeat_seconds=settings.stream_heartbeat_seconds,
+            )
         )
 
     return app

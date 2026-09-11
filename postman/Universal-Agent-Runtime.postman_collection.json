@@ -1,0 +1,81 @@
+{
+  "info": {
+    "_postman_id": "d52a8245-4dc9-4a57-98c5-cc4b3d5c1c2d",
+    "name": "Universal Agent Runtime — server E2E",
+    "description": "Нет credentials. Сначала создайте и запустите Agent, затем выполните AG-UI run. Postman отображает SSE как поток raw response.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://127.0.0.1:8080" },
+    { "key": "agent_id", "value": "" },
+    { "key": "thread_id", "value": "postman-thread-1" },
+    { "key": "run_id", "value": "postman-run-1" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": { "method": "GET", "url": "{{base_url}}/healthz" }
+    },
+    {
+      "name": "Readiness",
+      "request": { "method": "GET", "url": "{{base_url}}/readyz" }
+    },
+    {
+      "name": "Create Agent",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "const body = pm.response.json();",
+              "pm.collectionVariables.set('agent_id', body.agent_id);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"request_id\": \"postman-{{$guid}}\",\n  \"skills\": [\"task-decomposition\"],\n  \"tools\": [\"get_task\"]\n}"
+        },
+        "url": "{{base_url}}/agents"
+      }
+    },
+    {
+      "name": "Start Agent",
+      "request": {
+        "method": "POST",
+        "url": "{{base_url}}/agents/{{agent_id}}/start"
+      }
+    },
+    {
+      "name": "AG-UI Run (SSE)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Accept", "value": "text/event-stream" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"threadId\": \"{{thread_id}}\",\n  \"runId\": \"{{run_id}}\",\n  \"state\": {},\n  \"messages\": [{\n    \"id\": \"postman-message-1\",\n    \"role\": \"user\",\n    \"content\": \"Составь декомпозицию задачи TTEST2-94.\"\n  }],\n  \"tools\": [],\n  \"context\": [],\n  \"forwardedProps\": {}\n}"
+        },
+        "url": "{{base_url}}/ag-ui/agents/{{agent_id}}/run"
+      }
+    },
+    {
+      "name": "Legacy committed SSE",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Accept", "value": "text/event-stream" }
+        ],
+        "body": { "mode": "raw", "raw": "{\"content\":\"Покажи краткий план без вызова Tool.\"}" },
+        "url": "{{base_url}}/agents/{{agent_id}}/messages/stream"
+      }
+    }
+  ]
+}

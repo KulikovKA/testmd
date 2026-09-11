@@ -162,6 +162,36 @@ class RuntimeDriverConfigurationTests(unittest.TestCase):
         ):
             ApplicationSettings.from_environment(_environment("unknown"))
 
+    def test_sfera_credentials_are_required_as_a_pair_and_redacted_from_repr(self) -> None:
+        settings = ApplicationSettings.from_environment(
+            {
+                **_environment("kata"),
+                "UAR_SFERA_BASE_URL": "https://sfera.ai.dev.sfera-t1.ru",
+                "UAR_SFERA_USERNAME_SECRET_ID": "sfera-username",
+                "UAR_SFERA_USERNAME": "private-user",
+                "UAR_SFERA_PASSWORD_SECRET_ID": "sfera-password",
+                "UAR_SFERA_PASSWORD": "private-password",
+            }
+        )
+        self.assertEqual(settings.sfera_base_url, "https://sfera.ai.dev.sfera-t1.ru")
+        self.assertNotIn("private-user", repr(settings))
+        self.assertNotIn("private-password", repr(settings))
+        with self.assertRaisesRegex(ConfigurationError, "Sfera"):
+            ApplicationSettings.from_environment(
+                {
+                    **_environment("docker"),
+                    "UAR_SFERA_BASE_URL": "https://sfera.ai.dev.sfera-t1.ru",
+                    "UAR_SFERA_USERNAME_SECRET_ID": "sfera-username",
+                }
+            )
+        with self.assertRaisesRegex(ConfigurationError, "UAR_SFERA_BASE_URL"):
+            ApplicationSettings.from_environment(
+                {
+                    **_environment("docker"),
+                    "UAR_SFERA_BASE_URL": "https://sfera.ai.dev.sfera-t1.ru/untrusted",
+                }
+            )
+
 
 class DockerRuntimeSelectionTests(unittest.IsolatedAsyncioTestCase):
     async def _exercise_lifecycle(
