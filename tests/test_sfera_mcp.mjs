@@ -119,6 +119,52 @@ test("get_task logs in with exact JSON, retains all cookies, and exposes only ge
   });
 });
 
+for (const [sourceId, normalizedId] of [["225", 225], ["000225", 225], [225, 225], ["9007199254740992", "9007199254740992"]]) {
+  test(`get_task normalizes Sfera id ${JSON.stringify(sourceId)} safely`, async () => {
+    await withMcp(async (request, response) => {
+      if (request.url === "/app/ppau/api/auth/login") return login(response);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        ...task,
+        id: sourceId,
+        children: [{ id: sourceId, number: "TTEST2-95", name: "Дочерняя задача" }],
+      }));
+    }, async (mcp) => {
+      const response = await mcp.request("tools/call", { name: "get_task", arguments: { entity_number: "TTEST2-94" } });
+      const payload = result(response);
+      assert.equal(payload.numeric_id, normalizedId);
+      assert.equal(payload.children[0].numeric_id, normalizedId);
+    });
+  });
+}
+
+for (const sourceId of ["0", "000", "225 ", " 225", "1e3", "1.5", -1, 1.5]) {
+  test(`get_task rejects invalid Sfera id ${JSON.stringify(sourceId)}`, async () => {
+    await withMcp(async (request, response) => {
+      if (request.url === "/app/ppau/api/auth/login") return login(response);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ...task, id: sourceId }));
+    }, async (mcp) => {
+      const response = await mcp.request("tools/call", { name: "get_task", arguments: { entity_number: "TTEST2-94" } });
+      assert.equal(result(response).error.code, "invalid_schema");
+    });
+  });
+}
+
+test("get_task rejects an invalid child Sfera id", async () => {
+  await withMcp(async (request, response) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      ...task,
+      children: [{ id: "225 ", number: "TTEST2-95", name: "Дочерняя задача" }],
+    }));
+  }, async (mcp) => {
+    const response = await mcp.request("tools/call", { name: "get_task", arguments: { entity_number: "TTEST2-94" } });
+    assert.equal(result(response).error.code, "invalid_schema");
+  });
+});
+
 test("one entity 401 invalidates cookies, logs in once more, and retries once", async () => {
   let reads = 0;
   await withMcp(async (request, response, calls) => {

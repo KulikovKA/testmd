@@ -176,6 +176,7 @@ def _compose_interaction(settings: ApplicationSettings) -> AgentInteraction:
         sfera_base_url=settings.sfera_base_url,
         sfera_username=settings.sfera_username,
         sfera_password=settings.sfera_password,
+        sfera_ca_cert_path=settings.sfera_ca_cert_path,
         sfera_timeout_seconds=settings.sfera_timeout_seconds,
         sfera_max_response_bytes=settings.sfera_max_response_bytes,
         task_mcp_server_path=(

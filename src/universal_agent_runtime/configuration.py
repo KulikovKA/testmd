@@ -108,6 +108,32 @@ def _optional_sfera_endpoint(environment: Mapping[str, str]) -> str | None:
     return value.rstrip("/")
 
 
+def _optional_sfera_ca_cert_path(environment: Mapping[str, str]) -> Path | None:
+    raw = environment.get("UAR_SFERA_CA_CERT_PATH", "").strip()
+    if not raw:
+        return None
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        raise ConfigurationError("UAR_SFERA_CA_CERT_PATH must be an absolute path")
+    try:
+        certificate = candidate.resolve(strict=True)
+        size = certificate.stat().st_size
+        contents = certificate.read_bytes()
+    except (OSError, ValueError):
+        raise ConfigurationError(
+            "UAR_SFERA_CA_CERT_PATH must reference a readable PEM file"
+        ) from None
+    if (
+        not certificate.is_file()
+        or not 1 <= size <= 1_048_576
+        or b"-----BEGIN CERTIFICATE-----" not in contents
+    ):
+        raise ConfigurationError(
+            "UAR_SFERA_CA_CERT_PATH must reference a readable PEM file"
+        )
+    return certificate
+
+
 @dataclass(frozen=True)
 class ApplicationSettings:
     """Explicit non-secret deployment inputs needed to assemble the local PoC."""
@@ -143,6 +169,7 @@ class ApplicationSettings:
     sfera_username: str | None = field(default=None, repr=False)
     sfera_password_secret_id: str | None = None
     sfera_password: str | None = field(default=None, repr=False)
+    sfera_ca_cert_path: Path | None = None
     sfera_timeout_seconds: float = 10.0
     sfera_max_response_bytes: int = 65_536
     chat_max_message_characters: int = 16_384
@@ -196,6 +223,8 @@ class ApplicationSettings:
             value is None for value in sfera_credentials
         ):
             raise ConfigurationError("Sfera configuration requires username and password")
+        if self.sfera_ca_cert_path is not None and self.sfera_base_url is None:
+            raise ConfigurationError("UAR_SFERA_CA_CERT_PATH requires UAR_SFERA_BASE_URL")
         if self.qwen_reasoning_directive not in {"/think", "/no_think"}:
             raise ConfigurationError(
                 "UAR_QWEN_REASONING_DIRECTIVE must be /think or /no_think"
@@ -311,6 +340,7 @@ class ApplicationSettings:
             sfera_username=sfera_username or None,
             sfera_password_secret_id=sfera_password_secret_id or None,
             sfera_password=sfera_password or None,
+            sfera_ca_cert_path=_optional_sfera_ca_cert_path(values),
             sfera_timeout_seconds=_positive_float(
                 {"UAR_SFERA_TIMEOUT_SECONDS": "10", **values},
                 "UAR_SFERA_TIMEOUT_SECONDS",

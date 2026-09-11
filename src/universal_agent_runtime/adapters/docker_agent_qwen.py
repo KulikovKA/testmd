@@ -43,8 +43,9 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
         workspace: str,
         user: str,
         skill_catalog: SkillPackageCatalog | None = None,
+        client: Any | None = None,
     ) -> None:
-        super().__init__(config)
+        super().__init__(config, client=client)
         self._workspace_target = workspace
         parts = user.split(":")
         if len(parts) != 2 or not all(part.isdigit() for part in parts):
@@ -240,6 +241,10 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
         if self._config.sfera_username is not None:
             result["UAR_SFERA_USERNAME"] = self._config.sfera_username
             result["UAR_SFERA_PASSWORD"] = self._config.sfera_password or ""
+        if self._config.sfera_ca_cert_path is not None:
+            result["NODE_EXTRA_CA_CERTS"] = (
+                self._config.sfera_ca_cert_container_path
+            )
         return result
 
     def _receive(self, invocation: QwenInvocation, chunks: object) -> None:

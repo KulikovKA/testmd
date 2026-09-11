@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -15,7 +17,7 @@ from universal_agent_runtime.application.ports.runtime_values import (
     Readiness,
     ResourceLimits,
 )
-from universal_agent_runtime.composition import _compose_runtime
+from universal_agent_runtime.composition import _compose_interaction, _compose_runtime
 from universal_agent_runtime.configuration import (
     ApplicationSettings,
     ConfigurationError,
@@ -182,6 +184,40 @@ class RuntimeDriverConfigurationTests(unittest.TestCase):
                     **_environment("docker"),
                     "UAR_SFERA_BASE_URL": "https://sfera.ai.dev.sfera-t1.ru",
                     "UAR_SFERA_USERNAME_SECRET_ID": "sfera-username",
+                }
+            )
+
+    def test_sfera_ca_certificate_must_be_an_absolute_readable_pem(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            certificate = Path(directory) / "sfera-ca.pem"
+            certificate.write_text(
+                "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+                encoding="ascii",
+            )
+            settings = ApplicationSettings.from_environment(
+                {
+                    **_environment("kata"),
+                    "UAR_SFERA_BASE_URL": "https://sfera.ai.dev.sfera-t1.ru",
+                    "UAR_SFERA_USERNAME_SECRET_ID": "sfera-username",
+                    "UAR_SFERA_USERNAME": "private-user",
+                    "UAR_SFERA_PASSWORD_SECRET_ID": "sfera-password",
+                    "UAR_SFERA_PASSWORD": "private-password",
+                    "UAR_SFERA_CA_CERT_PATH": str(certificate),
+                }
+            )
+            self.assertEqual(settings.sfera_ca_cert_path, certificate.resolve())
+            with patch(
+                "universal_agent_runtime.adapters.qwen_session.docker.from_env",
+                return_value=object(),
+            ):
+                interaction = _compose_interaction(settings)
+            self.assertEqual(interaction._config.sfera_ca_cert_path, certificate.resolve())
+
+        with self.assertRaisesRegex(ConfigurationError, "absolute path"):
+            ApplicationSettings.from_environment(
+                {
+                    **_environment("docker"),
+                    "UAR_SFERA_CA_CERT_PATH": "sfera-ca.pem",
                 }
             )
         with self.assertRaisesRegex(ConfigurationError, "UAR_SFERA_BASE_URL"):

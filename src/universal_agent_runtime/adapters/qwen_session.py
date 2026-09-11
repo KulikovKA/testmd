@@ -6,7 +6,7 @@ import os
 import shutil
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
@@ -76,6 +76,7 @@ class QwenSessionConfig:
     sfera_base_url: str | None = None
     sfera_username: str | None = field(default=None, repr=False)
     sfera_password: str | None = field(default=None, repr=False)
+    sfera_ca_cert_path: Path | None = None
     sfera_timeout_seconds: float = 10.0
     sfera_max_response_bytes: int = 65_536
     task_mcp_server_path: str = "/workspace/.uar-tools/task_rest_mcp_server.mjs"
@@ -131,6 +132,11 @@ class QwenSessionConfig:
             raise ValueError("Sfera username and password must be configured together")
         if self.sfera_base_url is not None and not self.sfera_username:
             raise ValueError("Sfera configuration requires username and password")
+        if self.sfera_ca_cert_path is not None:
+            if self.sfera_base_url is None:
+                raise ValueError("Sfera CA certificate requires Sfera configuration")
+            if not isinstance(self.sfera_ca_cert_path, Path):
+                raise TypeError("sfera_ca_cert_path must be a Path")
         if any(
             value is not None and (not value or "\x00" in value)
             for value in (self.sfera_username, self.sfera_password)
@@ -150,6 +156,14 @@ class QwenSessionConfig:
             raise ValueError("Task MCP configuration is invalid")
         if self.reasoning_directive not in {"/think", "/no_think"}:
             raise ValueError("reasoning_directive must be /think or /no_think")
+
+    @property
+    def sfera_ca_cert_container_path(self) -> str:
+        """Stable Agent-workspace path inherited by the Node MCP process."""
+
+        return str(
+            PurePosixPath(self.task_mcp_server_path).with_name("sfera-ca.pem")
+        )
 
 
 @dataclass(frozen=True)
@@ -278,6 +292,13 @@ class DockerQwenCommandRunner:
             if invocation.task_operations and self._config.sfera_username is not None:
                 environment["UAR_SFERA_USERNAME"] = self._config.sfera_username
                 environment["UAR_SFERA_PASSWORD"] = self._config.sfera_password or ""
+            if (
+                invocation.task_operations
+                and self._config.sfera_ca_cert_path is not None
+            ):
+                environment["NODE_EXTRA_CA_CERTS"] = (
+                    self._config.sfera_ca_cert_container_path
+                )
             container = self._client.containers.run(
                 self._config.image,
                 command,
@@ -433,9 +454,17 @@ class QwenSessionAdapter:
     def _task_mcp_server(self, reference: SessionReference) -> Path:
         return self._workspace(reference) / ".uar-tools" / "task_rest_mcp_server.mjs"
 
+    def _sfera_ca_certificate(self, reference: SessionReference) -> Path:
+        return self._task_mcp_server(reference).with_name("sfera-ca.pem")
+
     def _atomic_write(self, path: Path, content: str) -> None:
         temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
         temporary.write_text(content, encoding="utf-8", newline="\n")
+        os.replace(temporary, path)
+
+    def _atomic_write_bytes(self, path: Path, content: bytes) -> None:
+        temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        temporary.write_bytes(content)
         os.replace(temporary, path)
 
     def _write_settings(self, reference: SessionReference) -> None:
@@ -498,6 +527,11 @@ class QwenSessionAdapter:
         target = self._task_mcp_server(reference)
         target.parent.mkdir(parents=True, exist_ok=True)
         self._atomic_write(target, source.read_text(encoding="utf-8"))
+        if self._config.sfera_ca_cert_path is not None:
+            self._atomic_write_bytes(
+                self._sfera_ca_certificate(reference),
+                self._config.sfera_ca_cert_path.read_bytes(),
+            )
 
     def _write_state(self, state: _SessionState) -> None:
         payload = {

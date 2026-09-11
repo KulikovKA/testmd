@@ -97,16 +97,27 @@ function named(value) {
   return { identifier: value.identifier, name: value.name };
 }
 
+function normalizedPositiveId(value) {
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value > 0 ? value : null;
+  }
+  if (typeof value !== "string" || !/^[0-9]+$/.test(value) || !/[1-9]/.test(value)) return null;
+  const numeric = Number(value);
+  return Number.isSafeInteger(numeric) ? numeric : value;
+}
+
 function child(value) {
-  if (!object(value) || !Number.isInteger(value.id) || value.id < 1 || !validEntityNumber(value.number) || !safeText(value.name, 1, 2000)) throw new Error("invalid_schema");
-  return { numeric_id: value.id, number: value.number, title: value.name };
+  const numericId = object(value) ? normalizedPositiveId(value.id) : null;
+  if (!object(value) || numericId === null || !validEntityNumber(value.number) || !safeText(value.name, 1, 2000)) throw new Error("invalid_schema");
+  return { numeric_id: numericId, number: value.number, title: value.name };
 }
 
 function normalizeTask(value) {
-  if (!object(value) || !Number.isInteger(value.id) || value.id < 1 || !validEntityNumber(value.number) || !safeText(value.name, 1, 2000) || !safeText(value.description, 0, 16000) || !Array.isArray(value.children) || value.children.length > 100) throw new Error("invalid_schema");
+  const numericId = object(value) ? normalizedPositiveId(value.id) : null;
+  if (!object(value) || numericId === null || !validEntityNumber(value.number) || !safeText(value.name, 1, 2000) || !safeText(value.description, 0, 16000) || !Array.isArray(value.children) || value.children.length > 100) throw new Error("invalid_schema");
   const normalized = {
     number: value.number,
-    numeric_id: value.id,
+    numeric_id: numericId,
     title: value.name,
     description: value.description,
     state: safeText(value.state, 1, 128) ? value.state : null,

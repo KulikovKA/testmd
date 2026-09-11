@@ -43,6 +43,12 @@ cookies только в памяти своего дочернего проце�
 Qwen не может передавать URL, HTTP method, headers или произвольное тело.
 Принимаются только номера вида `TTEST2-94`; ответ нормализуется и ограничивается
 по размеру. Стандартная TLS-проверка Node `fetch` остаётся включённой.
+Если сертификат Sfera подписан дополнительным корпоративным CA, задайте
+`UAR_SFERA_CA_CERT_PATH` как абсолютный путь к PEM на host. При создании Agent
+Orchestrator копирует PEM в его изолированный workspace; Node MCP получает путь
+через `NODE_EXTRA_CA_CERTS`. Это добавляет trust anchor и не отключает системную
+TLS-проверку. Если переменная не задана, Node использует только стандартный
+системный trust store.
 `create_task`, `create_subtask` и `update_task` намеренно не предоставляются:
 их реальные контракты Sfera ещё не подтверждены.
 
@@ -96,6 +102,9 @@ sudo -u uar python3.11 -m venv /opt/universal-agent-runtime/.venv
 sudo -u uar /opt/universal-agent-runtime/.venv/bin/python -m pip install --upgrade pip
 sudo -u uar /opt/universal-agent-runtime/.venv/bin/python -m pip install /opt/universal-agent-runtime
 sudo install -o root -g uar -m 0640 .env.example /etc/universal-agent-runtime/orchestrator.env
+# Только если цепочка Sfera требует корпоративный CA: скопируйте PEM из
+# защищённого внутреннего хранилища, не добавляя его в репозиторий.
+sudo install -o root -g uar -m 0644 /secure/source/sfera-ca.pem /etc/universal-agent-runtime/sfera-ca.pem
 sudoedit /etc/universal-agent-runtime/orchestrator.env
 sudo -u uar /opt/universal-agent-runtime/build-agent-image.sh uar-agent:0.1.0
 ```
@@ -116,6 +125,7 @@ UAR_SFERA_USERNAME_SECRET_ID=sfera-username
 UAR_SFERA_USERNAME=<secret>
 UAR_SFERA_PASSWORD_SECRET_ID=sfera-password
 UAR_SFERA_PASSWORD=<secret>
+UAR_SFERA_CA_CERT_PATH=/etc/universal-agent-runtime/sfera-ca.pem
 ```
 
 Остальные обязательные значения есть в `.env.example`, включая shell-safe
