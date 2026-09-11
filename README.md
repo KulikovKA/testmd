@@ -104,7 +104,7 @@ sudo -u uar /opt/universal-agent-runtime/.venv/bin/python -m pip install /opt/un
 sudo install -o root -g uar -m 0640 .env.example /etc/universal-agent-runtime/orchestrator.env
 # Только если цепочка Sfera требует корпоративный CA: скопируйте PEM из
 # защищённого внутреннего хранилища, не добавляя его в репозиторий.
-sudo install -o root -g uar -m 0644 /secure/source/sfera-ca.pem /etc/universal-agent-runtime/sfera-ca.pem
+sudo install -o root -g uar -m 0640 /secure/source/sfera-ca.pem /etc/universal-agent-runtime/sfera-ca.pem
 sudoedit /etc/universal-agent-runtime/orchestrator.env
 sudo -u uar /opt/universal-agent-runtime/build-agent-image.sh uar-agent:0.1.0
 ```
