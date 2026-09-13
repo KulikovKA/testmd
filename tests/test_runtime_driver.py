@@ -164,6 +164,37 @@ class RuntimeDriverConfigurationTests(unittest.TestCase):
         ):
             ApplicationSettings.from_environment(_environment("unknown"))
 
+    def test_qwen_timeouts_are_configurable_and_mapped_to_session(self) -> None:
+        defaults = ApplicationSettings.from_environment(_environment("docker"))
+        self.assertEqual(defaults.qwen_request_timeout_seconds, 600)
+        self.assertEqual(defaults.qwen_wall_time_seconds, 900)
+        settings = ApplicationSettings.from_environment(
+            {
+                **_environment("docker"),
+                "UAR_QWEN_REQUEST_TIMEOUT_SECONDS": "601",
+                "UAR_QWEN_WALL_TIME_SECONDS": "901",
+            }
+        )
+        self.assertEqual(settings.qwen_request_timeout_seconds, 601)
+        self.assertEqual(settings.qwen_wall_time_seconds, 901)
+        with patch(
+            "universal_agent_runtime.adapters.qwen_session.docker.from_env",
+            return_value=object(),
+        ):
+            interaction = _compose_interaction(settings)
+        self.assertEqual(interaction._config.request_timeout_seconds, 601)
+        self.assertEqual(interaction._config.wall_time_seconds, 901)
+
+        for name in (
+            "UAR_QWEN_REQUEST_TIMEOUT_SECONDS",
+            "UAR_QWEN_WALL_TIME_SECONDS",
+        ):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ConfigurationError, name):
+                    ApplicationSettings.from_environment(
+                        {**_environment("docker"), name: "0"}
+                    )
+
     def test_sfera_credentials_are_required_as_a_pair_and_redacted_from_repr(self) -> None:
         settings = ApplicationSettings.from_environment(
             {

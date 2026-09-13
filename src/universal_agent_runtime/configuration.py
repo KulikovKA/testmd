@@ -164,6 +164,8 @@ class ApplicationSettings:
     qwen_api_key_secret_id: str
     qwen_api_key: str = field(repr=False)
     qwen_reasoning_directive: str = "/think"
+    qwen_request_timeout_seconds: int = 600
+    qwen_wall_time_seconds: int = 900
     sfera_base_url: str | None = None
     sfera_username_secret_id: str | None = None
     sfera_username: str | None = field(default=None, repr=False)
@@ -239,6 +241,12 @@ class ApplicationSettings:
             raise ConfigurationError(
                 "UAR_QWEN_REASONING_DIRECTIVE must be /think or /no_think"
             )
+        for value, name in (
+            (self.qwen_request_timeout_seconds, "UAR_QWEN_REQUEST_TIMEOUT_SECONDS"),
+            (self.qwen_wall_time_seconds, "UAR_QWEN_WALL_TIME_SECONDS"),
+        ):
+            if type(value) is not int or value < 1:
+                raise ConfigurationError(f"{name} must be a positive integer")
         if self.sfera_username_secret_id is not None:
             _identifier(
                 {"UAR_SFERA_USERNAME_SECRET_ID": self.sfera_username_secret_id},
@@ -345,6 +353,14 @@ class ApplicationSettings:
             qwen_api_key=_required(values, "UAR_QWEN_API_KEY"),
             qwen_reasoning_directive=values.get(
                 "UAR_QWEN_REASONING_DIRECTIVE", "/think"
+            ),
+            qwen_request_timeout_seconds=_positive_int(
+                {"UAR_QWEN_REQUEST_TIMEOUT_SECONDS": "600", **values},
+                "UAR_QWEN_REQUEST_TIMEOUT_SECONDS",
+            ),
+            qwen_wall_time_seconds=_positive_int(
+                {"UAR_QWEN_WALL_TIME_SECONDS": "900", **values},
+                "UAR_QWEN_WALL_TIME_SECONDS",
             ),
             sfera_base_url=_optional_sfera_endpoint(values),
             sfera_username_secret_id=sfera_username_secret_id or None,

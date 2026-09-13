@@ -173,6 +173,8 @@ def _compose_interaction(settings: ApplicationSettings) -> AgentInteraction:
         model=settings.qwen_model,
         api_key=settings.qwen_api_key,
         reasoning_directive=settings.qwen_reasoning_directive,
+        request_timeout_seconds=settings.qwen_request_timeout_seconds,
+        wall_time_seconds=settings.qwen_wall_time_seconds,
         sfera_base_url=settings.sfera_base_url,
         sfera_username=settings.sfera_username,
         sfera_password=settings.sfera_password,
