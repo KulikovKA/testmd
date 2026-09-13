@@ -203,6 +203,13 @@ function normalizeTask(value) {
   return normalized;
 }
 
+function normalizeCreateResponse(value) {
+  if (!object(value) || !validEntityNumber(value.number)) {
+    throw new Error("invalid_schema");
+  }
+  return { number: value.number };
+}
+
 async function getTask(entityNumber) {
   if (!sessionCookie) await login();
   const url = new URL(`/app/tasks/api/v1/entity-views/${encodeURIComponent(entityNumber)}`, baseUrl);
@@ -252,7 +259,8 @@ async function createTask(input) {
   if (response.statusCode !== 201) throw new Error("service_failure");
   let payload;
   try { payload = JSON.parse(raw); } catch { throw new Error("invalid_schema"); }
-  const { children: _children, ...normalized } = normalizeTask(payload);
+  const created = normalizeCreateResponse(payload);
+  const { children: _children, ...normalized } = await getTask(created.number);
   return normalized;
 }
 

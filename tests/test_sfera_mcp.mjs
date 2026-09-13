@@ -207,19 +207,25 @@ const createdTask = {
 test("create_task posts a fixed ordinary-Task payload and returns normalized data", async () => {
   await withMcp(async (request, response, calls) => {
     if (request.url === "/app/ppau/api/auth/login") return login(response);
-    assert.equal(request.method, "POST");
-    assert.equal(request.url, "/app/tasks/api/v1/entities");
+    if (request.url === "/app/tasks/api/v1/entities") {
+      assert.equal(request.method, "POST");
+      assert.match(request.headers.cookie, /SESSION=one/);
+      assert.deepEqual(JSON.parse(calls.at(-1).body), {
+        area: "TTEST2",
+        description: "<p>Первая строка<br>Вторая &amp; строка</p>",
+        name: "Новая задача",
+        owner: "sfera-admin",
+        priority: "average",
+        status: "created",
+        type: "task",
+      });
+      response.writeHead(201, { "content-type": "application/json" });
+      return response.end(JSON.stringify({ number: "TTEST2-97" }));
+    }
+    assert.equal(request.method, "GET");
+    assert.equal(request.url, "/app/tasks/api/v1/entity-views/TTEST2-97");
     assert.match(request.headers.cookie, /SESSION=one/);
-    assert.deepEqual(JSON.parse(calls.at(-1).body), {
-      area: "TTEST2",
-      description: "<p>Первая строка<br>Вторая &amp; строка</p>",
-      name: "Новая задача",
-      owner: "sfera-admin",
-      priority: "average",
-      status: "created",
-      type: "task",
-    });
-    response.writeHead(201, { "content-type": "application/json" });
+    response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(createdTask));
   }, async (mcp, calls) => {
     const response = await mcp.request("tools/call", { name: "create_task", arguments: createInput });
@@ -235,11 +241,34 @@ test("create_task posts a fixed ordinary-Task payload and returns normalized dat
 test("create_task normalizes a numeric Sfera id", async () => {
   await withMcp(async (request, response) => {
     if (request.url === "/app/ppau/api/auth/login") return login(response);
-    response.writeHead(201, { "content-type": "application/json" });
+    if (request.url === "/app/tasks/api/v1/entities") {
+      response.writeHead(201, { "content-type": "application/json" });
+      return response.end(JSON.stringify({ number: "TTEST2-98" }));
+    }
+    response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({ ...createdTask, id: 229, number: "TTEST2-98" }));
   }, async (mcp) => {
     const response = await mcp.request("tools/call", { name: "create_task", arguments: createInput });
     assert.equal(result(response).numeric_id, 229);
+  }, { capabilities: "create_task", defaultOwner: "sfera-admin" });
+});
+
+test("create_task never repeats POST after a successful creation when entity-view normalization fails", async () => {
+  let posts = 0;
+  await withMcp(async (request, response) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    if (request.url === "/app/tasks/api/v1/entities") {
+      posts += 1;
+      response.writeHead(201, { "content-type": "application/json" });
+      return response.end(JSON.stringify({ number: "TTEST2-97" }));
+    }
+    assert.equal(request.url, "/app/tasks/api/v1/entity-views/TTEST2-97");
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end("not-json");
+  }, async (mcp) => {
+    const response = await mcp.request("tools/call", { name: "create_task", arguments: createInput });
+    assert.equal(result(response).error.code, "invalid_schema");
+    assert.equal(posts, 1);
   }, { capabilities: "create_task", defaultOwner: "sfera-admin" });
 });
 
@@ -263,9 +292,13 @@ test("create_task retries a 401 once with a fresh login", async () => {
   let creates = 0;
   await withMcp(async (request, response, calls) => {
     if (request.url === "/app/ppau/api/auth/login") return login(response, String(calls.length));
-    creates += 1;
-    if (creates === 1) return response.writeHead(401).end("{}");
-    response.writeHead(201, { "content-type": "application/json" });
+    if (request.url === "/app/tasks/api/v1/entities") {
+      creates += 1;
+      if (creates === 1) return response.writeHead(401).end("{}");
+      response.writeHead(201, { "content-type": "application/json" });
+      return response.end(JSON.stringify({ number: "TTEST2-97" }));
+    }
+    response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(createdTask));
   }, async (mcp, calls) => {
     const response = await mcp.request("tools/call", { name: "create_task", arguments: createInput });
@@ -280,7 +313,7 @@ for (const [name, status, body, code] of [
   ["timeout response", 408, "{}", "timeout"],
   ["unexpected status", 200, "{}", "service_failure"],
   ["malformed JSON", 201, "not-json", "invalid_schema"],
-  ["invalid schema", 201, JSON.stringify({ ...createdTask, id: "bad" }), "invalid_schema"],
+  ["invalid schema", 201, JSON.stringify({ number: "bad" }), "invalid_schema"],
 ]) {
   test(`create_task handles ${name} safely`, async () => {
     await withMcp(async (request, response) => {
