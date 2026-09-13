@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
 from dataclasses import replace
@@ -40,6 +41,18 @@ class SferaCertificatePlumbingTests(unittest.TestCase):
             adapter = QwenSessionAdapter(config, runner=object())
 
             asyncio.run(adapter.create_session(reference))
+
+            settings = json.loads(
+                (
+                    root / "sessions" / "agent-one" / "qwen-home" / "settings.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                settings["modelProviders"]["openai"][0]["generationConfig"][
+                    "extra_body"
+                ]["reasoning_effort"],
+                "none",
+            )
 
             copied = (
                 root

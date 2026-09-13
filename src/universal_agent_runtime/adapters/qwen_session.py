@@ -500,7 +500,7 @@ class QwenSessionAdapter:
                                 "temperature": 0,
                                 "max_tokens": self._config.max_tokens,
                             },
-                            "extra_body": {"reasoning_effort": "low"},
+                            "extra_body": {"reasoning_effort": "none"},
                         },
                     }
                 ]
