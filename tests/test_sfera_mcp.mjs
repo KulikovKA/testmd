@@ -205,12 +205,12 @@ const createdTask = {
 };
 
 test("create_task posts a fixed ordinary-Task payload and returns normalized data", async () => {
-  await withMcp(async (request, response) => {
+  await withMcp(async (request, response, calls) => {
     if (request.url === "/app/ppau/api/auth/login") return login(response);
     assert.equal(request.method, "POST");
     assert.equal(request.url, "/app/tasks/api/v1/entities");
     assert.match(request.headers.cookie, /SESSION=one/);
-    assert.deepEqual(JSON.parse(request.body), {
+    assert.deepEqual(JSON.parse(calls.at(-1).body), {
       area: "TTEST2",
       description: "<p>Первая строка<br>Вторая &amp; строка</p>",
       name: "Новая задача",
