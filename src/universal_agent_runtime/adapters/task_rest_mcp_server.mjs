@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Read-only Sfera Task MCP bridge. Qwen cannot select a URL, method, header,
-// request body, or operation beyond get_task.
+// Restricted Sfera Task MCP bridge. Qwen cannot select a URL, method, header,
+// request body, or operation beyond the declared Tools.
 
 import fs from "node:fs";
 import http from "node:http";
@@ -18,7 +18,9 @@ const customCaPath = process.env.NODE_EXTRA_CA_CERTS || "";
 const allowed = new Set(
   (process.env.UAR_AGENT_TOOL_CAPABILITIES || "")
     .split(",")
-    .filter((name) => name === "get_task" || (name === "create_task" && validDefaultOwner())),
+    .filter((name) => name === "get_task"
+      || name === "add_child_task"
+      || (name === "create_task" && validDefaultOwner())),
 );
 let sessionCookie = null;
 
@@ -264,6 +266,90 @@ async function createTask(input) {
   return normalized;
 }
 
+function childRelationResult(parent, child) {
+  return {
+    parent_epic: parent.number,
+    child_task: child.number,
+    attached: true,
+    already_exists: true,
+  };
+}
+
+function normalizeRelationState(value) {
+  if (
+    !object(value)
+    || !validEntityNumber(value.number)
+    || !safeText(value.type, 1, 128)
+    || !Array.isArray(value.children)
+    || value.children.length > 100
+    || value.children.some((number) => !validEntityNumber(number))
+  ) {
+    throw new Error("invalid_schema");
+  }
+  return { number: value.number, type: value.type, children: value.children };
+}
+
+async function getRelationState(entityNumber) {
+  if (!sessionCookie) await login();
+  const url = new URL(`/app/tasks/api/v1/entities/${encodeURIComponent(entityNumber)}`, baseUrl);
+  let { response, raw } = await fetchWithTimeout(url, { method: "GET", headers: { cookie: sessionCookie } });
+  if (response.statusCode === 401) {
+    sessionCookie = null;
+    await login();
+    ({ response, raw } = await fetchWithTimeout(url, { method: "GET", headers: { cookie: sessionCookie } }));
+  }
+  if (response.statusCode === 404) throw new Error("not_found");
+  if (response.statusCode === 401 || response.statusCode === 403) throw new Error("authentication_failed");
+  if (response.statusCode === 408 || response.statusCode === 504) throw new Error("timeout");
+  if (!isSuccess(response)) throw new Error("service_failure");
+  let payload;
+  try { payload = JSON.parse(raw); } catch { throw new Error("invalid_schema"); }
+  return normalizeRelationState(payload);
+}
+
+async function applyChildRelation(parent, child) {
+  if (!sessionCookie) await login();
+  const url = new URL(`/app/tasks/api/v1/entities/${encodeURIComponent(parent.number)}`, baseUrl);
+  const body = JSON.stringify({ children: [child.number] });
+  let { response } = await fetchWithTimeout(url, {
+    method: "PATCH",
+    headers: { "content-type": "application/json", cookie: sessionCookie },
+    body,
+  });
+  if (response.statusCode === 401) {
+    sessionCookie = null;
+    await login();
+    ({ response } = await fetchWithTimeout(url, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", cookie: sessionCookie },
+      body,
+    }));
+  }
+  if (response.statusCode === 403) throw new Error("authentication_failed");
+  if (response.statusCode === 408 || response.statusCode === 504) throw new Error("timeout");
+  if (!isSuccess(response)) throw new Error("service_failure");
+  const verified = await getRelationState(parent.number);
+  if (!verified.children.includes(child.number)) {
+    throw new Error("relation_verification_failed");
+  }
+  return {
+    parent_epic: parent.number,
+    child_task: child.number,
+    attached: true,
+    already_exists: false,
+  };
+}
+
+async function addChildTask(input) {
+  const parent = await getRelationState(input.parent_epic);
+  if (parent.type !== "epic") throw new Error("parent_not_epic");
+  const child = await getTask(input.child_task);
+  if (parent.children.includes(child.number)) {
+    return childRelationResult(parent, child);
+  }
+  return applyChildRelation(parent, child);
+}
+
 function validCreateInput(input) {
   return object(input)
     && Object.keys(input).length === 4
@@ -273,15 +359,27 @@ function validCreateInput(input) {
     && validPriority(input.priority);
 }
 
+function validAddChildInput(input) {
+  return object(input)
+    && Object.keys(input).length === 2
+    && validEntityNumber(input.parent_epic)
+    && validEntityNumber(input.child_task);
+}
+
 async function call(name, input) {
   if (!allowed.has(name)) return diagnostic("capability_denied", "operation is not enabled for this Agent");
   if (!validConfiguration()) return diagnostic("service_failure", "Sfera deployment configuration is invalid");
   if (name === "get_task" && (!object(input) || Object.keys(input).length !== 1 || !validEntityNumber(input.entity_number))) return diagnostic("invalid_input", "entity_number is invalid");
   if (name === "create_task" && (!validDefaultOwner() || !validCreateInput(input))) return diagnostic("invalid_input", "Task creation input is invalid");
-  if (name !== "get_task" && name !== "create_task") return diagnostic("capability_denied", "operation is not enabled for this Agent");
+  if (name === "add_child_task" && !validAddChildInput(input)) return diagnostic("invalid_input", "Epic and child Task numbers are invalid");
+  if (name !== "get_task" && name !== "create_task" && name !== "add_child_task") return diagnostic("capability_denied", "operation is not enabled for this Agent");
   try {
     return textResult(
-      name === "get_task" ? await getTask(input.entity_number) : await createTask(input),
+      name === "get_task"
+        ? await getTask(input.entity_number)
+        : name === "create_task"
+          ? await createTask(input)
+          : await addChildTask(input),
     );
   }
   catch (error) {
@@ -292,6 +390,8 @@ async function call(name, input) {
       timeout: "Sfera request timed out",
       response_limit: "Sfera response exceeded the configured limit",
       invalid_schema: "Sfera returned an invalid response",
+      parent_not_epic: "Only Epic entities support child decomposition",
+      relation_verification_failed: "Sfera did not confirm the child relation",
     };
     return diagnostic(Object.hasOwn(messages, code) ? code : "service_failure", messages[code] || "Sfera service is unavailable");
   }
@@ -313,6 +413,19 @@ const createDefinition = {
       name: { type: "string", minLength: 1, maxLength: 2000 },
       description: { type: "string", maxLength: 16000 },
       priority: { type: "string", enum: ["low", "average"] },
+    },
+  },
+};
+
+const addChildDefinition = {
+  description: "Attach one existing ordinary Task to one existing Epic and verify the relation. This operation changes only the Epic children relation.",
+  inputSchema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["parent_epic", "child_task"],
+    properties: {
+      parent_epic: { type: "string", pattern: "^[A-Z][A-Z0-9]{1,31}-[1-9][0-9]{0,9}$" },
+      child_task: { type: "string", pattern: "^[A-Z][A-Z0-9]{1,31}-[1-9][0-9]{0,9}$" },
     },
   },
 };
@@ -339,6 +452,7 @@ function startStdioServer() {
         if (request.method === "tools/list") return reply(id, { tools: [
           ...(allowed.has("get_task") ? [{ name: "get_task", ...definition }] : []),
           ...(allowed.has("create_task") ? [{ name: "create_task", ...createDefinition }] : []),
+          ...(allowed.has("add_child_task") ? [{ name: "add_child_task", ...addChildDefinition }] : []),
         ] });
         if (request.method === "tools/call") return reply(id, await call(request.params?.name, request.params?.arguments));
         if (id !== undefined) error(id, -32601, "method not found");

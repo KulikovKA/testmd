@@ -54,11 +54,15 @@ _TASK_SYSTEM_PROMPT = (
     "a discovered Task tool when it is necessary to answer the current request. "
     "get_task reads a Task. create_task creates only an ordinary Task when it is "
     "available and the selected Skill authorizes an explicit current-user creation "
-    "request. Never claim a Task was created without a successful tool result, "
+    "request. add_child_task attaches an existing ordinary Task only to an Epic. "
+    "For decomposition with child creation, read the source first and make no "
+    "mutations when it is not an Epic. Never claim a Task or relation was created "
+    "without a successful tool result, "
     "never invent Task numbers, URLs, HTTP methods, headers, or tool names, and "
     "never simulate an unavailable mutation."
 )
-TASK_TOOL_OPERATIONS = ("get_task", "create_task")
+TASK_TOOL_OPERATIONS = ("get_task", "create_task", "add_child_task")
+TASK_MUTATION_OPERATIONS = ("create_task", "add_child_task")
 
 
 @dataclass(frozen=True)

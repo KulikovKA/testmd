@@ -9,6 +9,7 @@ from typing import Any
 from docker.errors import DockerException
 
 from universal_agent_runtime.adapters.qwen_session import (
+    TASK_MUTATION_OPERATIONS,
     TASK_TOOL_OPERATIONS,
     DockerQwenCommandRunner,
     QwenExecution,
@@ -89,7 +90,7 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
                 task_operations = tuple(
                     operation
                     for operation in configured_operations
-                    if operation != "create_task"
+                    if operation not in TASK_MUTATION_OPERATIONS
                 )
             invocation = replace(
                 invocation,

@@ -178,15 +178,15 @@ test("create_task is visible only with its capability and configured owner", asy
   }, async (mcp) => {
     const listed = await mcp.request("tools/list", {});
     assert.deepEqual(listed.result.tools.map((tool) => tool.name), ["get_task"]);
-  }, { capabilities: "get_task,create_task" });
+  }, { capabilities: "get_task,create_task,add_child_task" });
 
   await withMcp(async (request, response) => {
     if (request.url === "/app/ppau/api/auth/login") return login(response);
     response.writeHead(500).end();
   }, async (mcp) => {
     const listed = await mcp.request("tools/list", {});
-    assert.deepEqual(listed.result.tools.map((tool) => tool.name), ["get_task", "create_task"]);
-  }, { capabilities: "get_task,create_task", defaultOwner: "sfera-admin" });
+    assert.deepEqual(listed.result.tools.map((tool) => tool.name), ["get_task", "create_task", "add_child_task"]);
+  }, { capabilities: "get_task,create_task,add_child_task", defaultOwner: "sfera-admin" });
 });
 
 const createInput = {
@@ -203,6 +203,30 @@ const createdTask = {
   name: createInput.name,
   description: "<p>Первая строка<br>Вторая &amp; строка</p>",
 };
+
+const epic = {
+  ...task,
+  id: "226",
+  number: "TTEST2-106",
+  name: "Родительский Epic",
+  type: { identifier: "epic", name: "Эпик" },
+};
+
+const childTask = {
+  ...task,
+  id: "227",
+  number: "TTEST2-107",
+  name: "Дочерняя задача",
+};
+
+const addChildInput = {
+  parent_epic: "TTEST2-106",
+  child_task: "TTEST2-107",
+};
+
+function relationState(entity, children = []) {
+  return { number: entity.number, type: entity.type.identifier, children };
+}
 
 test("create_task posts a fixed ordinary-Task payload and returns normalized data", async () => {
   await withMcp(async (request, response, calls) => {
@@ -338,6 +362,232 @@ test("create_task enforces the configured response-size limit", async () => {
     assert.equal(result(response).error.code, "response_limit");
   }, { maxResponseBytes: "1024", capabilities: "create_task", defaultOwner: "sfera-admin" });
 });
+
+test("add_child_task returns idempotent success for an existing Epic relation", async () => {
+  await withMcp(async (request, response) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    if (request.url === "/app/tasks/api/v1/entities/TTEST2-106") {
+      response.writeHead(200, { "content-type": "application/json" });
+      return response.end(JSON.stringify(relationState(epic, ["TTEST2-107"])));
+    }
+    assert.equal(request.url, "/app/tasks/api/v1/entity-views/TTEST2-107");
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(childTask));
+  }, async (mcp, calls) => {
+    const response = await mcp.request("tools/call", { name: "add_child_task", arguments: addChildInput });
+    assert.deepEqual(result(response), {
+      parent_epic: "TTEST2-106",
+      child_task: "TTEST2-107",
+      attached: true,
+      already_exists: true,
+    });
+    assert.equal(calls.filter((call) => call.method === "PATCH").length, 0);
+  }, { capabilities: "get_task,add_child_task" });
+});
+
+test("add_child_task rejects a non-Epic parent before any mutation", async () => {
+  await withMcp(async (request, response) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    assert.equal(request.url, "/app/tasks/api/v1/entities/TTEST2-106");
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(relationState({ ...task, number: "TTEST2-106" })));
+  }, async (mcp, calls) => {
+    const response = await mcp.request("tools/call", { name: "add_child_task", arguments: addChildInput });
+    assert.equal(result(response).error.code, "parent_not_epic");
+    assert.equal(calls.filter((call) => call.method === "POST" && call.path !== "/app/ppau/api/auth/login").length, 0);
+    assert.equal(calls.filter((call) => call.method === "PATCH").length, 0);
+    assert.equal(calls.filter((call) => call.path === "/app/tasks/api/v1/entity-views/TTEST2-107").length, 0);
+  }, { capabilities: "get_task,add_child_task" });
+});
+
+test("add_child_task maps missing parent and child to not_found", async () => {
+  await withMcp(async (request, response) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    response.writeHead(404, { "content-type": "application/json" });
+    response.end("{}");
+  }, async (mcp) => {
+    const response = await mcp.request("tools/call", { name: "add_child_task", arguments: addChildInput });
+    assert.equal(result(response).error.code, "not_found");
+  }, { capabilities: "get_task,add_child_task" });
+
+  await withMcp(async (request, response) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    if (request.url === "/app/tasks/api/v1/entities/TTEST2-106") {
+      response.writeHead(200, { "content-type": "application/json" });
+      return response.end(JSON.stringify(relationState(epic)));
+    }
+    response.writeHead(404, { "content-type": "application/json" });
+    response.end("{}");
+  }, async (mcp) => {
+    const response = await mcp.request("tools/call", { name: "add_child_task", arguments: addChildInput });
+    assert.equal(result(response).error.code, "not_found");
+  }, { capabilities: "get_task,add_child_task" });
+});
+
+test("add_child_task PATCHes one child and verifies the resulting relation", async () => {
+  let parentReads = 0;
+  await withMcp(async (request, response, calls) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    if (request.url === "/app/tasks/api/v1/entities/TTEST2-106" && request.method === "GET") {
+      parentReads += 1;
+      response.writeHead(200, { "content-type": "application/json" });
+      return response.end(JSON.stringify(relationState(epic, parentReads === 1 ? [] : ["TTEST2-107"])));
+    }
+    if (request.url === "/app/tasks/api/v1/entity-views/TTEST2-107") {
+      response.writeHead(200, { "content-type": "application/json" });
+      return response.end(JSON.stringify(childTask));
+    }
+    assert.equal(request.method, "PATCH");
+    assert.equal(request.url, "/app/tasks/api/v1/entities/TTEST2-106");
+    assert.match(request.headers.cookie, /SESSION=one/);
+    assert.deepEqual(JSON.parse(calls.at(-1).body), { children: ["TTEST2-107"] });
+    response.writeHead(204);
+    response.end();
+  }, async (mcp, calls) => {
+    const response = await mcp.request("tools/call", { name: "add_child_task", arguments: addChildInput });
+    assert.deepEqual(result(response), {
+      parent_epic: "TTEST2-106",
+      child_task: "TTEST2-107",
+      attached: true,
+      already_exists: false,
+    });
+    assert.equal(calls.filter((call) => call.method === "PATCH").length, 1);
+    assert.equal(parentReads, 2);
+  }, { capabilities: "get_task,add_child_task" });
+});
+
+test("add_child_task reports a failed PATCH without a verification read", async () => {
+  await withMcp(async (request, response) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    if (request.url === "/app/tasks/api/v1/entities/TTEST2-106" && request.method === "GET") {
+      response.writeHead(200, { "content-type": "application/json" });
+      return response.end(JSON.stringify(relationState(epic)));
+    }
+    if (request.url === "/app/tasks/api/v1/entity-views/TTEST2-107") {
+      response.writeHead(200, { "content-type": "application/json" });
+      return response.end(JSON.stringify(childTask));
+    }
+    assert.equal(request.method, "PATCH");
+    response.writeHead(500, { "content-type": "application/json" });
+    response.end("{}");
+  }, async (mcp, calls) => {
+    const response = await mcp.request("tools/call", { name: "add_child_task", arguments: addChildInput });
+    assert.equal(result(response).error.code, "service_failure");
+    assert.equal(calls.filter((call) => call.method === "PATCH").length, 1);
+    assert.equal(calls.filter((call) => call.path === "/app/tasks/api/v1/entities/TTEST2-106" && call.method === "GET").length, 1);
+  }, { capabilities: "get_task,add_child_task" });
+});
+
+test("add_child_task rejects a successful PATCH when verification omits the child", async () => {
+  let parentReads = 0;
+  await withMcp(async (request, response) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    if (request.url === "/app/tasks/api/v1/entities/TTEST2-106" && request.method === "GET") {
+      parentReads += 1;
+      response.writeHead(200, { "content-type": "application/json" });
+      return response.end(JSON.stringify(relationState(epic)));
+    }
+    if (request.url === "/app/tasks/api/v1/entity-views/TTEST2-107") {
+      response.writeHead(200, { "content-type": "application/json" });
+      return response.end(JSON.stringify(childTask));
+    }
+    assert.equal(request.method, "PATCH");
+    response.writeHead(204);
+    response.end();
+  }, async (mcp, calls) => {
+    const response = await mcp.request("tools/call", { name: "add_child_task", arguments: addChildInput });
+    assert.equal(result(response).error.code, "relation_verification_failed");
+    assert.equal(calls.filter((call) => call.method === "PATCH").length, 1);
+    assert.equal(parentReads, 2);
+  }, { capabilities: "get_task,add_child_task" });
+});
+
+test("Epic decomposition creates a Task and attaches it with its real number", async () => {
+  let parentReads = 0;
+  await withMcp(async (request, response, calls) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    if (request.url === "/app/tasks/api/v1/entities" && request.method === "POST") {
+      response.writeHead(201, { "content-type": "application/json" });
+      return response.end(JSON.stringify({ number: "TTEST2-107" }));
+    }
+    if (request.url === "/app/tasks/api/v1/entity-views/TTEST2-107") {
+      response.writeHead(200, { "content-type": "application/json" });
+      return response.end(JSON.stringify(childTask));
+    }
+    if (request.url === "/app/tasks/api/v1/entities/TTEST2-106" && request.method === "GET") {
+      parentReads += 1;
+      response.writeHead(200, { "content-type": "application/json" });
+      return response.end(JSON.stringify(relationState(epic, parentReads === 1 ? [] : ["TTEST2-107"])));
+    }
+    assert.equal(request.method, "PATCH");
+    assert.deepEqual(JSON.parse(calls.at(-1).body), { children: ["TTEST2-107"] });
+    response.writeHead(204);
+    response.end();
+  }, async (mcp, calls) => {
+    const created = await mcp.request("tools/call", { name: "create_task", arguments: createInput });
+    assert.equal(result(created).number, "TTEST2-107");
+    const relation = await mcp.request("tools/call", { name: "add_child_task", arguments: addChildInput });
+    assert.equal(result(relation).attached, true);
+    assert.equal(calls.filter((call) => call.method === "POST" && call.path === "/app/tasks/api/v1/entities").length, 1);
+    assert.equal(calls.filter((call) => call.method === "PATCH").length, 1);
+  }, { capabilities: "get_task,create_task,add_child_task", defaultOwner: "sfera-admin" });
+});
+
+test("a partial child-link failure does not repeat a successful create_task POST", async () => {
+  let parentReads = 0;
+  let patchAttempts = 0;
+  await withMcp(async (request, response) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    if (request.url === "/app/tasks/api/v1/entities" && request.method === "POST") {
+      response.writeHead(201, { "content-type": "application/json" });
+      return response.end(JSON.stringify({ number: "TTEST2-107" }));
+    }
+    if (request.url === "/app/tasks/api/v1/entity-views/TTEST2-107") {
+      response.writeHead(200, { "content-type": "application/json" });
+      return response.end(JSON.stringify(childTask));
+    }
+    if (request.url === "/app/tasks/api/v1/entities/TTEST2-106" && request.method === "GET") {
+      parentReads += 1;
+      response.writeHead(200, { "content-type": "application/json" });
+      return response.end(JSON.stringify(relationState(
+        epic,
+        patchAttempts >= 2 ? ["TTEST2-107"] : [],
+      )));
+    }
+    assert.equal(request.method, "PATCH");
+    patchAttempts += 1;
+    if (patchAttempts === 1) {
+      response.writeHead(500, { "content-type": "application/json" });
+      return response.end("{}");
+    }
+    response.writeHead(204);
+    response.end();
+  }, async (mcp, calls) => {
+    await mcp.request("tools/call", { name: "create_task", arguments: createInput });
+    const failed = await mcp.request("tools/call", { name: "add_child_task", arguments: addChildInput });
+    assert.equal(result(failed).error.code, "service_failure");
+    const retried = await mcp.request("tools/call", { name: "add_child_task", arguments: addChildInput });
+    assert.equal(result(retried).attached, true);
+    assert.equal(calls.filter((call) => call.method === "POST" && call.path === "/app/tasks/api/v1/entities").length, 1);
+    assert.equal(calls.filter((call) => call.method === "PATCH").length, 2);
+    assert.equal(parentReads, 3);
+  }, { capabilities: "get_task,create_task,add_child_task", defaultOwner: "sfera-admin" });
+});
+
+for (const argumentsValue of [
+  {},
+  { parent_epic: "TTEST2-106" },
+  { parent_epic: "TTEST2-106", child_task: "bad" },
+  { ...addChildInput, extra: "untrusted" },
+]) {
+  test("add_child_task rejects invalid input before a request", async () => {
+    await withMcp(async (_request, response) => response.writeHead(500).end(), async (mcp, calls) => {
+      const response = await mcp.request("tools/call", { name: "add_child_task", arguments: argumentsValue });
+      assert.equal(result(response).error.code, "invalid_input");
+      assert.equal(calls.length, 0);
+    }, { capabilities: "get_task,add_child_task" });
+  });
+}
 
 for (const [sourceId, normalizedId] of [["225", 225], ["000225", 225], [225, 225], ["9007199254740992", "9007199254740992"]]) {
   test(`get_task normalizes Sfera id ${JSON.stringify(sourceId)} safely`, async () => {

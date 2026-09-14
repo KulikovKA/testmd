@@ -15,7 +15,7 @@ Postman
       -> Agent
         -> Kata microVM (если выбран kata)
           -> Qwen Code
-            -> read-only Sfera MCP
+            -> restricted Sfera MCP
               -> Sfera Tasks
 ```
 
@@ -36,11 +36,18 @@ microVM от create до delete; между сообщениями microVM не 
 
 При заданных `UAR_SFERA_*` Agent получает `get_task`; при дополнительно заданном
 `UAR_SFERA_DEFAULT_OWNER` capability `create_task` создаёт только обычную Task.
+Skill `task-decomposition` допускает `create_task` и `add_child_task` только при
+явном текущем намерении пользователя создать декомпозицию. Перед любой mutation
+он читает исходную сущность: создавать и привязывать дочерние задачи разрешено
+только если `type.identifier` исходной сущности равен `epic`. Обычный запрос на
+анализ или предложение декомпозиции не получает mutation Tools.
 MCP сам выполняет `POST /app/ppau/api/auth/login`, удерживает все полученные
 cookies только в памяти своего дочернего процесса и затем вызывает строго
-фиксированные endpoints `GET /app/tasks/api/v1/entity-views/{entityNumber}` и
-`POST /app/tasks/api/v1/entities`. При первом ответе `401` он очищает cookies,
-выполняет один login и повторяет исходный запрос один раз.
+фиксированные endpoints `GET /app/tasks/api/v1/entity-views/{entityNumber}`,
+`GET /app/tasks/api/v1/entities/{entityNumber}`, `POST /app/tasks/api/v1/entities`
+и узкий `PATCH /app/tasks/api/v1/entities/{parentEpic}` только для children.
+При первом ответе `401` он очищает cookies, выполняет один login и повторяет
+исходный запрос один раз.
 
 Qwen не может передавать URL, HTTP method, headers или произвольное тело.
 Принимаются только номера вида `TTEST2-94`; ответ нормализуется и ограничивается
@@ -51,9 +58,14 @@ Orchestrator копирует PEM в его изолированный workspace
 через `NODE_EXTRA_CA_CERTS`. Это добавляет trust anchor и не отключает системную
 TLS-проверку. Если переменная не задана, Node использует только стандартный
 системный trust store.
-Поддерживаются только `get_task` и `create_task`. Не поддерживаются
-`update_task`, `delete_task` и `create_subtask`. `create_task` фиксирует
-`status=created` и `type=task`; не создаёт связи parent/child или native subtask.
+Поддерживаются `get_task`, `create_task` и `add_child_task`. `create_task`
+фиксирует `status=created` и `type=task`. `add_child_task` строго проверяет
+существование Epic и Task через фиксированные Sfera endpoints. Если связи ещё
+нет, MCP отправляет только `PATCH /app/tasks/api/v1/entities/{parentEpic}` с
+payload `{"children":["childTask"]}`, затем повторно читает Epic и сообщает
+успех только после появления child в `children`. Уже существующая связь не
+вызывает PATCH. Не поддерживаются `update_task`, `delete_task` и
+`create_subtask`.
 
 `task-decomposition` остаётся независимым от Tool: с пустым списком Tools он
 составляет план, а с `get_task` может дополнительно прочитать задачу.

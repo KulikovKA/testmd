@@ -31,12 +31,13 @@ class TaskCreationAuthorizationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._temporary.cleanup()
 
-    def test_skill_authorizes_create_task_only_for_explicit_current_intent(self) -> None:
+    def test_skill_authorizes_mutations_only_for_explicit_current_intent(self) -> None:
         skill, granted = SkillPackageCatalog.builtins().resolve(
-            ("task-decomposition",), ("get_task", "create_task")
+            ("task-decomposition",),
+            ("get_task", "create_task", "add_child_task"),
         )[0]
 
-        self.assertEqual(granted, ("get_task", "create_task"))
+        self.assertEqual(granted, ("get_task", "create_task", "add_child_task"))
         self.assertEqual(
             skill.authorized_tools(granted, "Декомпозируй TTEST2-89"),
             ("get_task",),
@@ -50,7 +51,7 @@ class TaskCreationAuthorizationTests(unittest.TestCase):
                 granted,
                 "Декомпозируй TTEST2-89 на 4 задачи и создай их в Sfera",
             ),
-            ("get_task", "create_task"),
+            ("get_task", "create_task", "add_child_task"),
         )
         self.assertEqual(
             skill.authorized_tools(
@@ -58,8 +59,15 @@ class TaskCreationAuthorizationTests(unittest.TestCase):
             ),
             ("get_task",),
         )
+        self.assertEqual(
+            skill.authorized_tools(
+                granted,
+                "Не изменяй исходную задачу, но создай дочерние задачи в Sfera",
+            ),
+            ("get_task", "create_task", "add_child_task"),
+        )
 
-    def test_qwen_allows_only_granted_tools_and_bounds_create_workflow(self) -> None:
+    def test_qwen_allows_only_granted_tools_and_bounds_mutation_workflow(self) -> None:
         runner = DockerQwenCommandRunner(self.config, client=object())
         invocation = QwenInvocation(
             Path(self._temporary.name) / "qwen-home",
@@ -67,15 +75,19 @@ class TaskCreationAuthorizationTests(unittest.TestCase):
             uuid4(),
             "message",
             False,
-            task_operations=("get_task", "create_task"),
+            task_operations=("get_task", "create_task", "add_child_task"),
         )
 
         command = runner.command(invocation)
         self.assertEqual(command[command.index("--max-tool-calls") + 1], "10")
         allowed = command.index("--allowed-tools")
         self.assertEqual(
-            command[allowed + 1 : allowed + 3],
-            ["task-rest__get_task", "task-rest__create_task"],
+            command[allowed + 1 : allowed + 4],
+            [
+                "task-rest__get_task",
+                "task-rest__create_task",
+                "task-rest__add_child_task",
+            ],
         )
 
     def test_owner_reaches_mcp_only_when_create_task_is_granted(self) -> None:
