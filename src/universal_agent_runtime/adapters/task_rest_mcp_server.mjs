@@ -166,9 +166,10 @@ function safeText(value, minimum, maximum) {
   return typeof value === "string" && value.length >= minimum && value.length <= maximum && !value.includes("\0");
 }
 
-function named(value) {
+function normalizedNamed(value) {
+  if (safeText(value, 1, 128)) return value;
   if (!object(value) || !safeText(value.identifier, 1, 128) || !safeText(value.name, 1, 512)) throw new Error("invalid_schema");
-  return { identifier: value.identifier, name: value.name };
+  return value.identifier;
 }
 
 function normalizedPositiveId(value) {
@@ -180,10 +181,11 @@ function normalizedPositiveId(value) {
   return Number.isSafeInteger(numeric) ? numeric : value;
 }
 
-function child(value) {
+function childNumber(value) {
+  if (validEntityNumber(value)) return value;
   const numericId = object(value) ? normalizedPositiveId(value.id) : null;
   if (!object(value) || numericId === null || !validEntityNumber(value.number) || !safeText(value.name, 1, 2000)) throw new Error("invalid_schema");
-  return { numeric_id: numericId, number: value.number, title: value.name };
+  return value.number;
 }
 
 function normalizeTask(value) {
@@ -195,11 +197,11 @@ function normalizeTask(value) {
     title: value.name,
     description: value.description,
     state: safeText(value.state, 1, 128) ? value.state : null,
-    status: named(value.status),
-    type: named(value.type),
-    priority: named(value.priority),
-    area: named(value.area),
-    children: value.children.map(child),
+    status: normalizedNamed(value.status),
+    type: normalizedNamed(value.type),
+    priority: normalizedNamed(value.priority),
+    area: normalizedNamed(value.area),
+    children: value.children.map(childNumber),
   };
   if (Buffer.byteLength(JSON.stringify(normalized), "utf8") > MAX_RESPONSE_BYTES) throw new Error("response_limit");
   return normalized;

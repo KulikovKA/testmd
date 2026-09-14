@@ -26,6 +26,19 @@ const task = {
   children: [],
 };
 
+const scalarEpic = {
+  id: "237",
+  number: "TTEST2-106",
+  area: "TTEST2",
+  type: "epic",
+  status: "created",
+  state: "Normal",
+  priority: "average",
+  name: "TEST111",
+  description: "<p>ТЕСТОВЫЙ ЭПИК</p>",
+  children: ["TTEST2-104", "TTEST2-105", "TTEST2-99"],
+};
+
 class McpClient {
   constructor(endpoint, {
     maxResponseBytes = "65536",
@@ -163,11 +176,38 @@ test("get_task logs in with exact JSON, retains all cookies, and exposes only ge
     const second = result(await mcp.request("tools/call", { name: "get_task", arguments: { entity_number: "TTEST2-94" } }));
     assert.equal(first.numeric_id, 225);
     assert.equal(first.title, task.name);
+    assert.equal(first.type, "task");
+    assert.equal(first.status, "created");
+    assert.equal(first.priority, "average");
+    assert.equal(first.area, "TTEST2");
     assert.deepEqual(second.children, []);
     assert.equal(calls.filter((call) => call.path === "/app/ppau/api/auth/login").length, 1);
     assert.equal(calls[0].method, "POST");
     assert.equal(calls[0].headers["content-type"], "application/json");
     assert.equal(calls[0].body, JSON.stringify({ username: "sfera-user", password: secret }));
+  });
+});
+
+test("get_task normalizes the real scalar Epic schema", async () => {
+  await withMcp(async (request, response) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    assert.equal(request.url, "/app/tasks/api/v1/entity-views/TTEST2-106");
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(scalarEpic));
+  }, async (mcp) => {
+    const response = await mcp.request("tools/call", { name: "get_task", arguments: { entity_number: "TTEST2-106" } });
+    assert.deepEqual(result(response), {
+      number: "TTEST2-106",
+      numeric_id: 237,
+      title: "TEST111",
+      description: "<p>ТЕСТОВЫЙ ЭПИК</p>",
+      state: "Normal",
+      status: "created",
+      type: "epic",
+      priority: "average",
+      area: "TTEST2",
+      children: ["TTEST2-104", "TTEST2-105", "TTEST2-99"],
+    });
   });
 });
 
@@ -603,7 +643,7 @@ for (const [sourceId, normalizedId] of [["225", 225], ["000225", 225], [225, 225
       const response = await mcp.request("tools/call", { name: "get_task", arguments: { entity_number: "TTEST2-94" } });
       const payload = result(response);
       assert.equal(payload.numeric_id, normalizedId);
-      assert.equal(payload.children[0].numeric_id, normalizedId);
+      assert.equal(payload.children[0], "TTEST2-95");
     });
   });
 }
@@ -631,6 +671,45 @@ test("get_task rejects an invalid child Sfera id", async () => {
     }));
   }, async (mcp) => {
     const response = await mcp.request("tools/call", { name: "get_task", arguments: { entity_number: "TTEST2-94" } });
+    assert.equal(result(response).error.code, "invalid_schema");
+  });
+});
+
+for (const [field, malformed] of [
+  ["type", { identifier: "epic" }],
+  ["area", { identifier: "TTEST2" }],
+]) {
+  test(`get_task rejects malformed ${field} representation`, async () => {
+    await withMcp(async (request, response) => {
+      if (request.url === "/app/ppau/api/auth/login") return login(response);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ...task, [field]: malformed }));
+    }, async (mcp) => {
+      const response = await mcp.request("tools/call", { name: "get_task", arguments: { entity_number: "TTEST2-94" } });
+      assert.equal(result(response).error.code, "invalid_schema");
+    });
+  });
+}
+
+test("get_task rejects malformed scalar child numbers and more than 100 children", async () => {
+  await withMcp(async (request, response) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ ...scalarEpic, children: ["TTEST2-104", "invalid"] }));
+  }, async (mcp) => {
+    const response = await mcp.request("tools/call", { name: "get_task", arguments: { entity_number: "TTEST2-106" } });
+    assert.equal(result(response).error.code, "invalid_schema");
+  });
+
+  await withMcp(async (request, response) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      ...scalarEpic,
+      children: Array.from({ length: 101 }, (_unused, index) => `TTEST2-${index + 1}`),
+    }));
+  }, async (mcp) => {
+    const response = await mcp.request("tools/call", { name: "get_task", arguments: { entity_number: "TTEST2-106" } });
     assert.equal(result(response).error.code, "invalid_schema");
   });
 });
