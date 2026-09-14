@@ -136,6 +136,7 @@ def run_once(base_url: str, scenario: str, entity: str | None, area: str | None,
     if not isinstance(agent_id, str):
         raise RuntimeError("Agent creation returned an invalid response")
     iteration_started_ns = time.perf_counter_ns()
+    metrics: dict[str, Any] = {}
     try:
         agent_start_started_ns = time.perf_counter_ns()
         status, _ = _request(base_url, "POST", f"/agents/{agent_id}/start")
@@ -166,7 +167,14 @@ def run_once(base_url: str, scenario: str, entity: str | None, area: str | None,
         })
         return metrics
     finally:
-        _request(base_url, "DELETE", f"/agents/{agent_id}")
+        cleanup_status: int | None = None
+        try:
+            cleanup_status, _ = _request(base_url, "DELETE", f"/agents/{agent_id}")
+        except RuntimeError:
+            # Cleanup is best effort; it must not hide the completed AG-UI result.
+            cleanup_status = None
+        if metrics:
+            metrics["cleanup_http_status"] = cleanup_status
 
 
 def _display_ms(value: object) -> str:

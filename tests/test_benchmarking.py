@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import io
+import json
+import logging
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -13,6 +16,7 @@ from universal_agent_runtime.adapters.qwen_session import (
     _emit_qwen_metric,
     _extract_mcp_metrics,
 )
+from universal_agent_runtime.benchmarking import _LOGGER, emit_benchmark_metric
 
 
 _SCRIPT = Path(__file__).parents[1] / "scripts" / "benchmark_agent.py"
@@ -23,6 +27,47 @@ _SPEC.loader.exec_module(benchmark)
 
 
 class BenchmarkClientTests(unittest.TestCase):
+    def test_disabled_benchmark_metric_emits_no_record(self) -> None:
+        stream = io.StringIO()
+        handler = _LOGGER.handlers[0]
+        old_stream = handler.stream
+        handler.setStream(stream)
+        try:
+            emit_benchmark_metric(False, "disabled", secret="do-not-log")
+        finally:
+            handler.setStream(old_stream)
+        self.assertEqual(stream.getvalue(), "")
+
+    def test_enabled_metric_is_json_and_has_no_duplicate_handler_output(self) -> None:
+        stream = io.StringIO()
+        handler = _LOGGER.handlers[0]
+        old_stream = handler.stream
+        handler.setStream(stream)
+        try:
+            emit_benchmark_metric(
+                True,
+                "test",
+                agent_id="agent-one",
+                turn_id="turn-one",
+                secret="secret-value",
+                prompt="private prompt",
+                response="private response",
+            )
+        finally:
+            handler.setStream(old_stream)
+        lines = stream.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        payload = json.loads(lines[0])
+        self.assertEqual(payload["event"], "uar_benchmark")
+        self.assertEqual(payload["kind"], "test")
+        self.assertNotIn("secret-value", lines[0])
+        self.assertNotIn("private prompt", lines[0])
+        self.assertNotIn("private response", lines[0])
+        self.assertEqual(
+            sum(getattr(item, "_uar_benchmark_handler", False) for item in _LOGGER.handlers),
+            1,
+        )
+
     def test_nearest_rank_percentile_and_aggregate(self) -> None:
         runs = [
             {"iteration_total_ms": 2.0, "time_to_first_text_ms": 1.0},
@@ -122,6 +167,40 @@ class BenchmarkClientTests(unittest.TestCase):
         self.assertEqual(result["agent_id"], "agent-benchmark")
         self.assertEqual(len(result["thread_id"]), 32)
         self.assertEqual(len(result["run_id"]), 32)
+
+    def test_cleanup_conflict_is_recorded_without_hiding_run_result(self) -> None:
+        def fake_request(_base: str, method: str, path: str, _body: object = None) -> tuple[int, bytes]:
+            if path == "/agents":
+                return 201, b'{"agent_id":"agent-benchmark"}'
+            if method == "DELETE":
+                return 409, b"{}"
+            return 200, b""
+
+        with (
+            patch.object(benchmark, "_request", side_effect=fake_request),
+            patch.object(
+                benchmark,
+                "_run_stream",
+                return_value=(
+                    200,
+                    {
+                        "success": False,
+                        "error": True,
+                        "time_to_run_started_ms": 1.0,
+                        "time_to_first_text_ms": None,
+                        "time_to_run_finished_ms": 2.0,
+                        "heartbeats": 0,
+                        "response_characters": 0,
+                    },
+                ),
+            ),
+        ):
+            result = benchmark.run_once(
+                "http://example.invalid", "chat", None, None, False
+            )
+        self.assertFalse(result["success"])
+        self.assertTrue(result["error"])
+        self.assertEqual(result["cleanup_http_status"], 409)
 
     def test_sse_timing_uses_the_ag_ui_timer_only(self) -> None:
         lines = [

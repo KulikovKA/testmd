@@ -48,7 +48,9 @@ endpoint. Отдельный AG-UI timer запускается непосред
 от него измеряются `time_to_run_started_ms`, `time_to_first_text_ms` и
 `time_to_run_finished_ms`. `ag_ui_total_ms` покрывает весь AG-UI request.
 `iteration_total_ms` начинается после успешного POST `/agents` и заканчивается
-после AG-UI run; DELETE cleanup в него не входит.
+после AG-UI run; DELETE cleanup в него не входит. Результат каждого run также
+содержит `cleanup_http_status`. Ошибка cleanup, включая 409 для BUSY/FAILED
+Agent, не скрывает основной AG-UI результат и не форсирует lifecycle delete.
 
 В terminal выводится компактная таблица repeat и aggregates min / median / mean
 / p95 / max. JSON остаётся machine-readable: без `--output` он пишется в stdout,
