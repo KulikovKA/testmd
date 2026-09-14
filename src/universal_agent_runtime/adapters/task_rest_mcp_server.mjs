@@ -16,6 +16,8 @@ const password = process.env.UAR_SFERA_PASSWORD || "";
 const defaultOwner = process.env.UAR_SFERA_DEFAULT_OWNER || "";
 const customCaPath = process.env.NODE_EXTRA_CA_CERTS || "";
 const benchmarkTimingEnabled = process.env.UAR_BENCHMARK_TIMING_ENABLED === "true";
+const benchmarkAgentId = process.env.UAR_BENCHMARK_AGENT_ID || "";
+const benchmarkTurnId = process.env.UAR_BENCHMARK_TURN_ID || "";
 const allowed = new Set(
   (process.env.UAR_AGENT_TOOL_CAPABILITIES || "")
     .split(",")
@@ -30,7 +32,12 @@ function durationMs(started) {
 }
 
 function metric(value) {
-  if (benchmarkTimingEnabled) process.stderr.write(`UAR_METRIC ${JSON.stringify(value)}\n`);
+  if (!benchmarkTimingEnabled) return;
+  const correlation = /^[A-Za-z0-9_-]{1,64}$/.test(benchmarkAgentId)
+    && /^[0-9a-f-]{36}:[1-9][0-9]*$/.test(benchmarkTurnId)
+    ? { agent_id: benchmarkAgentId, turn_id: benchmarkTurnId }
+    : {};
+  process.stderr.write(`UAR_METRIC ${JSON.stringify({ ...value, ...correlation })}\n`);
 }
 
 function routeClass(url) {

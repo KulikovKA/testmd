@@ -28,11 +28,33 @@ MCP пишет индивидуальные записи `mcp_tool` и `sfera_ht
 ```bash
 python3 scripts/benchmark_agent.py --base-url http://127.0.0.1:8080 --scenario chat --repeats 5 --output benchmark-chat.json
 python3 scripts/benchmark_agent.py --base-url http://127.0.0.1:8080 --scenario read --entity TTEST2-106 --repeats 5
-python3 scripts/benchmark_agent.py --base-url http://127.0.0.1:8080 --scenario epic-decomposition --entity TTEST2-106 --area TTEST2 --allow-mutations --repeats 1
+python3 scripts/benchmark_agent.py \
+  --base-url http://127.0.0.1:8080 \
+  --scenario epic-decomposition \
+  --area TTEST2 \
+  --allow-mutations \
+  --repeats 3 \
+  --output /tmp/uar-baseline.json
 ```
 
-Каждый repeat создаёт, запускает, использует и удаляет свежий Agent. Клиент
-использует AG-UI SSE и сохраняет TTRS, TTFT (первый `TEXT_MESSAGE_CONTENT`),
-finish, общую длительность, число heartbeats, success/error и число символов
-ответа. Prompts и model responses не попадают в его JSON output. Mutation
-scenario отклоняется до любого HTTP request без `--allow-mutations`.
+Каждый repeat создаёт, запускает, использует и удаляет свежий Agent. Для
+`epic-decomposition` клиент просит создать новый Epic в указанной area для
+AI-агента проверки технических требований и декомпозировать его на задачи; он
+не передаёт исходную entity, число задач или последовательность Tools.
+
+Клиент сохраняет безопасные `agent_id`, `thread_id` и `run_id`, но не сохраняет
+prompt или model response. `agent_start_ms` измеряется строго вокруг start
+endpoint. Отдельный AG-UI timer запускается непосредственно перед POST run;
+от него измеряются `time_to_run_started_ms`, `time_to_first_text_ms` и
+`time_to_run_finished_ms`. `ag_ui_total_ms` покрывает весь AG-UI request.
+`iteration_total_ms` начинается после успешного POST `/agents` и заканчивается
+после AG-UI run; DELETE cleanup в него не входит.
+
+В terminal выводится компактная таблица repeat и aggregates min / median / mean
+/ p95 / max. JSON остаётся machine-readable: без `--output` он пишется в stdout,
+а таблица — в stderr; с `--output` JSON записывается в файл. Mutation scenario
+отклоняется до любого HTTP request без `--allow-mutations`.
+
+Application metrics содержат `agent_id` и application `turn_id`. Qwen, MCP и
+Sfera metrics содержат `agent_id` и безопасный turn correlation вида
+`native_session_id:turn_ordinal`. AG-UI `run_id` не передаётся через domain.

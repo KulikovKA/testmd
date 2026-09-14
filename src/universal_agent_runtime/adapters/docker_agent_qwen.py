@@ -19,6 +19,7 @@ from universal_agent_runtime.adapters.qwen_session import (
     QwenRunnerFailure,
     QwenSessionConfig,
     _classify_runner_output,
+    _benchmark_environment,
     _emit_mcp_metrics,
     _emit_mcp_summary,
     _emit_qwen_metric,
@@ -188,7 +189,10 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
                     "OPENAI_API_KEY": self._config.api_key,
                     "UAR_AGENT_TOOL_CAPABILITIES": ",".join(invocation.task_operations),
                     **(
-                        {"UAR_BENCHMARK_TIMING_ENABLED": "true"}
+                        {
+                            "UAR_BENCHMARK_TIMING_ENABLED": "true",
+                            **_benchmark_environment(invocation),
+                        }
                         if self._config.benchmark_timing_enabled
                         else {}
                     ),
@@ -200,8 +204,12 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
             output = outcome.output.decode("utf-8", errors="replace")
             clean_output, mcp_metrics = _extract_mcp_metrics(output)
             metric_output = clean_output
-            _emit_mcp_metrics(self._config.benchmark_timing_enabled, mcp_metrics)
-            _emit_mcp_summary(self._config.benchmark_timing_enabled, mcp_metrics)
+            _emit_mcp_metrics(
+                self._config.benchmark_timing_enabled, mcp_metrics, invocation
+            )
+            _emit_mcp_summary(
+                self._config.benchmark_timing_enabled, mcp_metrics, invocation
+            )
             if outcome.exit_code == 55:
                 raise QwenRunnerFailure(Code.TIMEOUT)
             if outcome.exit_code != 0:
@@ -220,6 +228,7 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
                 started_ns,
                 metric_output,
                 execution_started_ns,
+                invocation,
             )
 
     def _environment_values(self, container: object) -> dict[str, str]:

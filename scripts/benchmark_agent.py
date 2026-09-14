@@ -48,6 +48,7 @@ def _aggregate(runs: list[dict[str, Any]], field: str) -> dict[str, float] | Non
         "median_ms": _percentile_nearest_rank(values, 0.5),
         "mean_ms": round(sum(values) / len(values), 3),
         "p95_ms": _percentile_nearest_rank(values, 0.95),
+        "max_ms": max(values),
     }
 
 
@@ -58,18 +59,24 @@ def _scenario_configuration(scenario: str, *, entity: str | None, area: str | No
         if not entity:
             raise ValueError("--entity is required for the read scenario")
         return ["task-decomposition"], ["get_task"], f"Read task {entity} and provide a concise summary."
-    if not entity or not area:
-        raise ValueError("--entity and --area are required for epic-decomposition")
+    if not area:
+        raise ValueError("--area is required for epic-decomposition")
     return (
         ["task-decomposition"],
         ["get_task", "create_task", "create_epic", "add_child_task"],
-        f"Read Epic {entity}, then create and attach one small ordinary child Task in area {area}.",
+        (
+            f"Создай Epic в {area} для AI-агента, который проверяет технические "
+            "требования на полноту, непротиворечивость и тестируемость, и "
+            "декомпозируй его на задачи."
+        ),
     )
 
 
 def _sse_metrics(lines: Any, started_ns: int) -> dict[str, Any]:
     result: dict[str, Any] = {
-        "ttrs_ms": None, "ttft_ms": None, "finish_ms": None,
+        "time_to_run_started_ms": None,
+        "time_to_first_text_ms": None,
+        "time_to_run_finished_ms": None,
         "heartbeats": 0, "success": False, "error": False, "response_characters": 0,
     }
     for raw_line in lines:
@@ -87,17 +94,17 @@ def _sse_metrics(lines: Any, started_ns: int) -> dict[str, Any]:
         if not isinstance(event, dict):
             continue
         event_type = event.get("type")
-        if event_type == "RUN_STARTED" and result["ttrs_ms"] is None:
-            result["ttrs_ms"] = now_ms
-        elif event_type == "TEXT_MESSAGE_CONTENT" and result["ttft_ms"] is None:
-            result["ttft_ms"] = now_ms
+        if event_type == "RUN_STARTED" and result["time_to_run_started_ms"] is None:
+            result["time_to_run_started_ms"] = now_ms
+        elif event_type == "TEXT_MESSAGE_CONTENT" and result["time_to_first_text_ms"] is None:
+            result["time_to_first_text_ms"] = now_ms
             delta = event.get("delta")
             result["response_characters"] = len(delta) if isinstance(delta, str) else 0
         elif event_type == "RUN_FINISHED":
-            result["finish_ms"] = now_ms
+            result["time_to_run_finished_ms"] = now_ms
             result["success"] = True
         elif event_type == "RUN_ERROR":
-            result["finish_ms"] = now_ms
+            result["time_to_run_finished_ms"] = now_ms
             result["error"] = True
     return result
 
@@ -128,22 +135,69 @@ def run_once(base_url: str, scenario: str, entity: str | None, area: str | None,
     agent_id = json.loads(payload).get("agent_id")
     if not isinstance(agent_id, str):
         raise RuntimeError("Agent creation returned an invalid response")
-    started_ns = time.perf_counter_ns()
+    iteration_started_ns = time.perf_counter_ns()
     try:
+        agent_start_started_ns = time.perf_counter_ns()
         status, _ = _request(base_url, "POST", f"/agents/{agent_id}/start")
+        agent_start_ms = round(
+            (time.perf_counter_ns() - agent_start_started_ns) / 1_000_000, 3
+        )
         if status != 200:
             raise RuntimeError("Agent start failed")
         thread_id, run_id = uuid.uuid4().hex, uuid.uuid4().hex
+        ag_ui_started_ns = time.perf_counter_ns()
         status, metrics = _run_stream(base_url, agent_id, {
             "threadId": thread_id, "runId": run_id, "state": {},
             "messages": [{"role": "user", "content": prompt}], "tools": [],
             "context": [], "forwardedProps": {},
-        }, started_ns)
+        }, ag_ui_started_ns)
         metrics["http_status"] = status
-        metrics["total_run_ms"] = round((time.perf_counter_ns() - started_ns) / 1_000_000, 3)
+        metrics.update({
+            "agent_id": agent_id,
+            "thread_id": thread_id,
+            "run_id": run_id,
+            "agent_start_ms": agent_start_ms,
+            "ag_ui_total_ms": round(
+                (time.perf_counter_ns() - ag_ui_started_ns) / 1_000_000, 3
+            ),
+            "iteration_total_ms": round(
+                (time.perf_counter_ns() - iteration_started_ns) / 1_000_000, 3
+            ),
+        })
         return metrics
     finally:
         _request(base_url, "DELETE", f"/agents/{agent_id}")
+
+
+def _display_ms(value: object) -> str:
+    return "-" if not isinstance(value, (int, float)) else f"{value:.1f}"
+
+
+def _print_summary(runs: list[dict[str, Any]]) -> None:
+    print("iteration success agent_start TTFT ag_ui_total iteration_total", file=sys.stderr)
+    for index, run in enumerate(runs, start=1):
+        print(
+            f"{index:9d} {str(run['success']):7s} "
+            f"{_display_ms(run.get('agent_start_ms')):11s} "
+            f"{_display_ms(run.get('time_to_first_text_ms')):4s} "
+            f"{_display_ms(run.get('ag_ui_total_ms')):11s} "
+            f"{_display_ms(run.get('iteration_total_ms')):15s}",
+            file=sys.stderr,
+        )
+    print("aggregate min median mean p95 max", file=sys.stderr)
+    for label, field in (
+        ("agent_start", "agent_start_ms"),
+        ("TTFT", "time_to_first_text_ms"),
+        ("ag_ui_total", "ag_ui_total_ms"),
+        ("iteration_total", "iteration_total_ms"),
+    ):
+        aggregate = _aggregate(runs, field)
+        if aggregate is not None:
+            print(
+                f"{label:15s} {aggregate['min_ms']:.1f} {aggregate['median_ms']:.1f} "
+                f"{aggregate['mean_ms']:.1f} {aggregate['p95_ms']:.1f} {aggregate['max_ms']:.1f}",
+                file=sys.stderr,
+            )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -165,13 +219,21 @@ def main(argv: list[str] | None = None) -> int:
     report = {
         "timestamp": datetime.now(UTC).isoformat(), "scenario": args.scenario,
         "repetitions": len(runs), "runs": runs,
-        "aggregate": {"total_run_ms": _aggregate(runs, "total_run_ms"), "ttft_ms": _aggregate(runs, "ttft_ms")},
+        "aggregate": {
+            "agent_start_ms": _aggregate(runs, "agent_start_ms"),
+            "ag_ui_total_ms": _aggregate(runs, "ag_ui_total_ms"),
+            "time_to_run_started_ms": _aggregate(runs, "time_to_run_started_ms"),
+            "time_to_first_text_ms": _aggregate(runs, "time_to_first_text_ms"),
+            "time_to_run_finished_ms": _aggregate(runs, "time_to_run_finished_ms"),
+            "iteration_total_ms": _aggregate(runs, "iteration_total_ms"),
+        },
     }
     rendered = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
     if args.output:
         args.output.write_text(rendered, encoding="utf-8")
     else:
         sys.stdout.write(rendered)
+    _print_summary(runs)
     return 0
 
 

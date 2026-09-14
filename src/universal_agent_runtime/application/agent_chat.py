@@ -193,6 +193,8 @@ class AgentChatService:
                     emit_benchmark_metric(
                         True,
                         "agent_interaction",
+                        agent_id=record.agent_id.value,
+                        turn_id=turn_id,
                         duration_ms=round(
                             (time.perf_counter_ns() - interaction_started_ns)
                             / 1_000_000,
@@ -265,6 +267,8 @@ class AgentChatService:
                 emit_benchmark_metric(
                     True,
                     "agent_turn",
+                    agent_id=record.agent_id.value,
+                    turn_id=turn_id,
                     duration_ms=duration_ms,
                     agent_application_ms=duration_ms,
                 )

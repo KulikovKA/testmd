@@ -196,6 +196,8 @@ class QwenInvocation:
     task_operations: tuple[str, ...] = ()
     skill_instructions: tuple[str, ...] = ()
     current_message: str = field(default="", repr=False)
+    benchmark_agent_id: str = ""
+    benchmark_turn_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -302,6 +304,7 @@ class DockerQwenCommandRunner:
             }
             if self._config.benchmark_timing_enabled:
                 environment["UAR_BENCHMARK_TIMING_ENABLED"] = "true"
+                environment.update(_benchmark_environment(invocation))
             if invocation.task_operations and self._config.sfera_base_url is not None:
                 environment.update(
                     {
@@ -360,8 +363,12 @@ class DockerQwenCommandRunner:
             )
             clean_output, mcp_metrics = _extract_mcp_metrics(output)
             metric_output = clean_output
-            _emit_mcp_metrics(self._config.benchmark_timing_enabled, mcp_metrics)
-            _emit_mcp_summary(self._config.benchmark_timing_enabled, mcp_metrics)
+            _emit_mcp_metrics(
+                self._config.benchmark_timing_enabled, mcp_metrics, invocation
+            )
+            _emit_mcp_summary(
+                self._config.benchmark_timing_enabled, mcp_metrics, invocation
+            )
             status = int(wait_result["StatusCode"])
             if status == 55:
                 raise QwenRunnerFailure(QwenRunnerErrorCode.TIMEOUT)
@@ -387,6 +394,7 @@ class DockerQwenCommandRunner:
                     started_ns,
                     metric_output,
                     execution_started_ns,
+                    invocation,
                 )
             if container is not None:
                 try:
@@ -485,7 +493,29 @@ def _extract_mcp_metrics(output: str) -> tuple[str, tuple[dict[str, Any], ...]]:
     return "\n".join(clean), tuple(metrics)
 
 
-def _emit_mcp_metrics(enabled: bool, metrics: tuple[dict[str, Any], ...]) -> None:
+def _benchmark_environment(invocation: QwenInvocation) -> dict[str, str]:
+    if not invocation.benchmark_agent_id or not invocation.benchmark_turn_id:
+        return {}
+    return {
+        "UAR_BENCHMARK_AGENT_ID": invocation.benchmark_agent_id,
+        "UAR_BENCHMARK_TURN_ID": invocation.benchmark_turn_id,
+    }
+
+
+def _benchmark_correlation(invocation: QwenInvocation) -> dict[str, str]:
+    if not invocation.benchmark_agent_id or not invocation.benchmark_turn_id:
+        return {}
+    return {
+        "agent_id": invocation.benchmark_agent_id,
+        "turn_id": invocation.benchmark_turn_id,
+    }
+
+
+def _emit_mcp_metrics(
+    enabled: bool,
+    metrics: tuple[dict[str, Any], ...],
+    invocation: QwenInvocation,
+) -> None:
     for metric in metrics:
         duration = metric.get("duration_ms")
         success = metric.get("success")
@@ -501,7 +531,12 @@ def _emit_mcp_metrics(enabled: bool, metrics: tuple[dict[str, Any], ...]) -> Non
             if name not in TASK_TOOL_OPERATIONS:
                 continue
             emit_benchmark_metric(
-                enabled, kind, tool_name=name, duration_ms=duration, success=success
+                enabled,
+                kind,
+                tool_name=name,
+                duration_ms=duration,
+                success=success,
+                **_benchmark_correlation(invocation),
             )
             continue
         route = metric.get("route")
@@ -524,10 +559,15 @@ def _emit_mcp_metrics(enabled: bool, metrics: tuple[dict[str, Any], ...]) -> Non
             status_code=status,
             status_class=status_class,
             success=success,
+            **_benchmark_correlation(invocation),
         )
 
 
-def _emit_mcp_summary(enabled: bool, metrics: tuple[dict[str, Any], ...]) -> None:
+def _emit_mcp_summary(
+    enabled: bool,
+    metrics: tuple[dict[str, Any], ...],
+    invocation: QwenInvocation,
+) -> None:
     if not enabled:
         return
     calls = [metric for metric in metrics if metric.get("kind") == "mcp_tool"]
@@ -544,6 +584,7 @@ def _emit_mcp_summary(enabled: bool, metrics: tuple[dict[str, Any], ...]) -> Non
         mcp_calls_total=sum(by_tool.values()),
         mcp_total_ms=round(total_ms, 3),
         mcp_calls_by_tool=by_tool,
+        **_benchmark_correlation(invocation),
     )
 
 
@@ -552,6 +593,7 @@ def _emit_qwen_metric(
     started_ns: int,
     output: str | None,
     execution_started_ns: int = 0,
+    invocation: QwenInvocation | None = None,
 ) -> None:
     if not enabled or not started_ns:
         return
@@ -582,6 +624,8 @@ def _emit_qwen_metric(
             }:
                 event_types[event_type] = event_types.get(event_type, 0) + 1
         values["stream_json_event_types"] = event_types
+    if invocation is not None:
+        values.update(_benchmark_correlation(invocation))
     emit_benchmark_metric(True, "qwen_execution", **values)
 
 
@@ -937,6 +981,10 @@ class QwenSessionAdapter:
                     prompt,
                     resume=transcript is not None,
                     current_message=request.message,
+                    benchmark_agent_id=request.session.agent_id.value,
+                    benchmark_turn_id=(
+                        f"{state.native_session_id}:{state.completed_turns + 1}"
+                    ),
                 )
             )
         except QwenRunnerFailure as error:

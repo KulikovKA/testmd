@@ -45,6 +45,8 @@ class McpClient {
     capabilities = "get_task",
     defaultOwner = "",
     benchmark = false,
+    benchmarkAgentId = "",
+    benchmarkTurnId = "",
   } = {}) {
     this.child = spawn(process.execPath, [serverPath], {
       env: {
@@ -56,6 +58,8 @@ class McpClient {
         UAR_SFERA_MAX_RESPONSE_BYTES: maxResponseBytes,
         UAR_AGENT_TOOL_CAPABILITIES: capabilities,
         ...(benchmark ? { UAR_BENCHMARK_TIMING_ENABLED: "true" } : {}),
+        ...(benchmarkAgentId ? { UAR_BENCHMARK_AGENT_ID: benchmarkAgentId } : {}),
+        ...(benchmarkTurnId ? { UAR_BENCHMARK_TURN_ID: benchmarkTurnId } : {}),
         ...(defaultOwner ? { UAR_SFERA_DEFAULT_OWNER: defaultOwner } : {}),
       },
       stdio: ["pipe", "pipe", "pipe"],
@@ -146,13 +150,18 @@ test("benchmark mode emits only structured MCP and normalized Sfera HTTP metrics
     await new Promise((resolve) => setImmediate(resolve));
     const tool = mcp.metrics.find((metric) => metric.kind === "mcp_tool");
     const entity = mcp.metrics.find((metric) => metric.route === "entity_view_get");
-    assert.deepEqual(Object.keys(tool).sort(), ["duration_ms", "kind", "success", "tool_name"]);
+    assert.equal(tool.agent_id, "agent-one");
+    assert.equal(tool.turn_id, "00000000-0000-0000-0000-000000000001:1");
     assert.equal(tool.tool_name, "get_task");
     assert.equal(entity.method, "GET");
     assert.equal(entity.status_code, 200);
     assert.equal(entity.success, true);
     assert.doesNotMatch(JSON.stringify(mcp.metrics), /TTEST2-94|sfera-password-must-not-leak/);
-  }, { benchmark: true });
+  }, {
+    benchmark: true,
+    benchmarkAgentId: "agent-one",
+    benchmarkTurnId: "00000000-0000-0000-0000-000000000001:1",
+  });
 });
 
 async function requestOptionsFor(extraCaPath) {
