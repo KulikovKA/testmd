@@ -183,8 +183,8 @@ function normalizedPositiveId(value) {
 
 function childNumber(value) {
   if (validEntityNumber(value)) return value;
-  const numericId = object(value) ? normalizedPositiveId(value.id) : null;
-  if (!object(value) || numericId === null || !validEntityNumber(value.number) || !safeText(value.name, 1, 2000)) throw new Error("invalid_schema");
+  if (!object(value) || !validEntityNumber(value.number) || !safeText(value.name, 1, 2000)) throw new Error("invalid_schema");
+  if (Object.hasOwn(value, "id") && normalizedPositiveId(value.id) === null) throw new Error("invalid_schema");
   return value.number;
 }
 

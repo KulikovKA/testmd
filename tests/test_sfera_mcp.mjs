@@ -211,6 +211,29 @@ test("get_task normalizes the real scalar Epic schema", async () => {
   });
 });
 
+test("get_task normalizes a real child object without id", async () => {
+  await withMcp(async (request, response) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    assert.equal(request.url, "/app/tasks/api/v1/entity-views/TTEST2-106");
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      ...scalarEpic,
+      children: [{
+        identifier: "TTEST2-99",
+        name: "TEST 3 NOT EPIC",
+        number: "TTEST2-99",
+        state: "Normal",
+        type: { identifier: "task", name: "Задача" },
+        priority: { identifier: "average", name: "Средний" },
+        status: { identifier: "created", name: "Создано" },
+      }],
+    }));
+  }, async (mcp) => {
+    const response = await mcp.request("tools/call", { name: "get_task", arguments: { entity_number: "TTEST2-106" } });
+    assert.deepEqual(result(response).children, ["TTEST2-99"]);
+  });
+});
+
 test("create_task is visible only with its capability and configured owner", async () => {
   await withMcp(async (request, response) => {
     if (request.url === "/app/ppau/api/auth/login") return login(response);
@@ -674,6 +697,22 @@ test("get_task rejects an invalid child Sfera id", async () => {
     assert.equal(result(response).error.code, "invalid_schema");
   });
 });
+
+for (const child of [
+  { name: "Дочерняя задача" },
+  { number: "invalid", name: "Дочерняя задача" },
+]) {
+  test("get_task rejects a malformed object child", async () => {
+    await withMcp(async (request, response) => {
+      if (request.url === "/app/ppau/api/auth/login") return login(response);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ...scalarEpic, children: [child] }));
+    }, async (mcp) => {
+      const response = await mcp.request("tools/call", { name: "get_task", arguments: { entity_number: "TTEST2-106" } });
+      assert.equal(result(response).error.code, "invalid_schema");
+    });
+  });
+}
 
 for (const [field, malformed] of [
   ["type", { identifier: "epic" }],
