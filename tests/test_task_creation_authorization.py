@@ -7,6 +7,9 @@ from uuid import uuid4
 
 from universal_agent_runtime.adapters.docker_agent_qwen import DockerAgentQwenRunner
 from universal_agent_runtime.adapters.qwen_session import (
+    TASK_CREATION_OPERATIONS,
+    TASK_MUTATION_OPERATIONS,
+    TASK_TOOL_OPERATIONS,
     DockerQwenCommandRunner,
     QwenInvocation,
     QwenSessionConfig,
@@ -34,10 +37,25 @@ class TaskCreationAuthorizationTests(unittest.TestCase):
     def test_skill_authorizes_mutations_only_for_explicit_current_intent(self) -> None:
         skill, granted = SkillPackageCatalog.builtins().resolve(
             ("task-decomposition",),
-            ("get_task", "create_task", "add_child_task"),
+            ("get_task", "create_task", "create_epic", "add_child_task"),
         )[0]
 
-        self.assertEqual(granted, ("get_task", "create_task", "add_child_task"))
+        self.assertEqual(
+            TASK_TOOL_OPERATIONS,
+            ("get_task", "create_task", "create_epic", "add_child_task"),
+        )
+        self.assertEqual(TASK_CREATION_OPERATIONS, ("create_task", "create_epic"))
+        self.assertEqual(
+            TASK_MUTATION_OPERATIONS,
+            ("create_task", "create_epic", "add_child_task"),
+        )
+        self.assertEqual(
+            granted,
+            ("get_task", "create_task", "create_epic", "add_child_task"),
+        )
+        self.assertEqual(skill.version, "1.4.0")
+        self.assertEqual(skill.tool_capabilities, TASK_TOOL_OPERATIONS)
+        self.assertEqual(skill.mutation_tool_capabilities, TASK_MUTATION_OPERATIONS)
         self.assertEqual(
             skill.authorized_tools(granted, "Декомпозируй TTEST2-89"),
             ("get_task",),
@@ -54,9 +72,7 @@ class TaskCreationAuthorizationTests(unittest.TestCase):
             ("get_task", "create_task", "add_child_task"),
         )
         self.assertEqual(
-            skill.authorized_tools(
-                granted, "Не создавай задачи в Sfera"
-            ),
+            skill.authorized_tools(granted, "Не создавай задачи в Sfera"),
             ("get_task",),
         )
         self.assertEqual(
@@ -65,6 +81,28 @@ class TaskCreationAuthorizationTests(unittest.TestCase):
                 "Не изменяй исходную задачу, но создай дочерние задачи в Sfera",
             ),
             ("get_task", "create_task", "add_child_task"),
+        )
+        self.assertEqual(
+            skill.authorized_tools(granted, "Создай Epic в TTEST2"),
+            ("get_task", "create_epic"),
+        )
+        self.assertEqual(
+            skill.authorized_tools(
+                granted, "Привяжи TTEST2-107 к TTEST2-106"
+            ),
+            ("get_task", "add_child_task"),
+        )
+        self.assertEqual(
+            skill.authorized_tools(
+                granted, "Не создавай новую задачу, только привяжи TTEST2-107"
+            ),
+            ("get_task", "add_child_task"),
+        )
+        self.assertEqual(
+            skill.authorized_tools(
+                granted, "Создай Epic и декомпозируй его на 3 задачи"
+            ),
+            ("get_task", "create_task", "create_epic", "add_child_task"),
         )
 
     def test_qwen_allows_only_granted_tools_and_bounds_mutation_workflow(self) -> None:
@@ -75,17 +113,18 @@ class TaskCreationAuthorizationTests(unittest.TestCase):
             uuid4(),
             "message",
             False,
-            task_operations=("get_task", "create_task", "add_child_task"),
+            task_operations=("get_task", "create_task", "create_epic", "add_child_task"),
         )
 
         command = runner.command(invocation)
         self.assertEqual(command[command.index("--max-tool-calls") + 1], "10")
         allowed = command.index("--allowed-tools")
         self.assertEqual(
-            command[allowed + 1 : allowed + 4],
+            command[allowed + 1 : allowed + 5],
             [
                 "task-rest__get_task",
                 "task-rest__create_task",
+                "task-rest__create_epic",
                 "task-rest__add_child_task",
             ],
         )
@@ -103,6 +142,10 @@ class TaskCreationAuthorizationTests(unittest.TestCase):
         )
         self.assertEqual(
             runner._task_environment(("get_task", "create_task"))["UAR_SFERA_DEFAULT_OWNER"],
+            "sfera-admin",
+        )
+        self.assertEqual(
+            runner._task_environment(("get_task", "create_epic"))["UAR_SFERA_DEFAULT_OWNER"],
             "sfera-admin",
         )
 

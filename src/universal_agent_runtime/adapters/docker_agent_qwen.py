@@ -9,6 +9,7 @@ from typing import Any
 from docker.errors import DockerException
 
 from universal_agent_runtime.adapters.qwen_session import (
+    TASK_CREATION_OPERATIONS,
     TASK_MUTATION_OPERATIONS,
     TASK_TOOL_OPERATIONS,
     DockerQwenCommandRunner,
@@ -214,7 +215,7 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
             if (
                 operation in values.get("UAR_AGENT_TOOL_CAPABILITIES", "").split(",")
                 and (
-                    operation != "create_task"
+                    operation not in TASK_CREATION_OPERATIONS
                     or self._config.sfera_default_owner is not None
                 )
             )
@@ -253,7 +254,7 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
             result["UAR_SFERA_USERNAME"] = self._config.sfera_username
             result["UAR_SFERA_PASSWORD"] = self._config.sfera_password or ""
         if (
-            "create_task" in operations
+            any(operation in operations for operation in TASK_CREATION_OPERATIONS)
             and self._config.sfera_default_owner is not None
         ):
             result["UAR_SFERA_DEFAULT_OWNER"] = self._config.sfera_default_owner

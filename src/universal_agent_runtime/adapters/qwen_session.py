@@ -52,17 +52,19 @@ _TASK_SYSTEM_PROMPT = (
     "Use facts from the prior conversation when needed. Never repeat an earlier "
     "assistant reply unless CURRENT_USER_MESSAGE explicitly asks for it. Use only "
     "a discovered Task tool when it is necessary to answer the current request. "
-    "get_task reads a Task. create_task creates only an ordinary Task when it is "
-    "available and the selected Skill authorizes an explicit current-user creation "
-    "request. add_child_task attaches an existing ordinary Task only to an Epic. "
+    "get_task reads a Task. create_task creates only an ordinary Task. create_epic "
+    "creates only an Epic when each is available and the selected Skill authorizes "
+    "an explicit current-user creation request. add_child_task attaches an existing "
+    "ordinary Task only to an Epic. "
     "For decomposition with child creation, read the source first and make no "
     "mutations when it is not an Epic. Never claim a Task or relation was created "
     "without a successful tool result, "
     "never invent Task numbers, URLs, HTTP methods, headers, or tool names, and "
     "never simulate an unavailable mutation."
 )
-TASK_TOOL_OPERATIONS = ("get_task", "create_task", "add_child_task")
-TASK_MUTATION_OPERATIONS = ("create_task", "add_child_task")
+TASK_TOOL_OPERATIONS = ("get_task", "create_task", "create_epic", "add_child_task")
+TASK_CREATION_OPERATIONS = ("create_task", "create_epic")
+TASK_MUTATION_OPERATIONS = (*TASK_CREATION_OPERATIONS, "add_child_task")
 
 
 @dataclass(frozen=True)
@@ -306,7 +308,10 @@ class DockerQwenCommandRunner:
                 environment["UAR_SFERA_USERNAME"] = self._config.sfera_username
                 environment["UAR_SFERA_PASSWORD"] = self._config.sfera_password or ""
             if (
-                "create_task" in invocation.task_operations
+                any(
+                    operation in invocation.task_operations
+                    for operation in TASK_CREATION_OPERATIONS
+                )
                 and self._config.sfera_default_owner is not None
             ):
                 environment["UAR_SFERA_DEFAULT_OWNER"] = (

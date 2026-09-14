@@ -20,15 +20,39 @@ _MANIFEST_FIELDS = {
     "tool_capabilities",
     "mutation_tool_capabilities",
 }
-_EXPLICIT_DECOMPOSITION_MUTATION_INTENT = re.compile(
+_EXPLICIT_TASK_CREATE_INTENT = re.compile(
     r"(?:\bcreate\b.{0,120}\btask(?:s)?\b|"
     r"\btask(?:s)?\b.{0,120}\bcreate\b|"
     r"\bсозда(?:й|йте|ть|дим|йте)\w*.{0,120}\bзадач\w*\b|"
     r"\bзадач\w*.{0,120}\bсозда(?:й|йте|ть|дим|йте)\w*\b)",
     re.IGNORECASE,
 )
-_NEGATED_DECOMPOSITION_MUTATION_INTENT = re.compile(
-    r"(?:\bdo\s+not\s+create\b|\bне\s+созда\w*)", re.IGNORECASE
+_EXPLICIT_EPIC_CREATE_INTENT = re.compile(
+    r"(?:\bcreate\s+(?:an?\s+)?epics?\b|"
+    r"\bepics?\b.{0,120}\bcreate\b|"
+    r"\bсозда(?:й|йте|ть|дим)\w*.{0,120}\b(?:эпик\w*|epics?)\b|"
+    r"\b(?:эпик\w*|epics?)\b.{0,120}\bсозда(?:й|йте|ть|дим)\w*)",
+    re.IGNORECASE,
+)
+_EXPLICIT_ATTACH_INTENT = re.compile(
+    r"(?:\b(?:attach|link)\b|\bпривяж\w*|\bприкреп\w*)", re.IGNORECASE
+)
+_DECOMPOSITION_INTENT = re.compile(
+    r"(?:\bdecompos\w*|\bдекомпозир\w*|\bдочерн\w*)", re.IGNORECASE
+)
+_NEGATED_TASK_CREATE_INTENT = re.compile(
+    r"(?:\b(?:do\s+not|don't)\s+create(?:\s+a\s+new)?\s+task\w*\b|"
+    r"\bне\s+созда\w*(?:\s+нов\w*)?\s+задач\w*)",
+    re.IGNORECASE,
+)
+_NEGATED_EPIC_CREATE_INTENT = re.compile(
+    r"(?:\b(?:do\s+not|don't)\s+create(?:\s+an?)?\s+epics?\b|"
+    r"\bне\s+созда\w*\s+(?:эпик\w*|epics?))",
+    re.IGNORECASE,
+)
+_NEGATED_ATTACH_INTENT = re.compile(
+    r"(?:\b(?:do\s+not|don't)\s+(?:attach|link)\b|\bне\s+привяж\w*)",
+    re.IGNORECASE,
 )
 
 
@@ -66,13 +90,29 @@ class SkillPackage:
         effective = tuple(
             tool for tool in granted_tools if tool in self.tool_capabilities
         )
-        if (
-            _EXPLICIT_DECOMPOSITION_MUTATION_INTENT.search(current_message) is not None
-            and _NEGATED_DECOMPOSITION_MUTATION_INTENT.search(current_message) is None
-        ):
-            return effective
+        epic_requested = _EXPLICIT_EPIC_CREATE_INTENT.search(current_message) is not None
+        decomposition_requested = _DECOMPOSITION_INTENT.search(current_message) is not None
+        task_requested = (
+            _EXPLICIT_TASK_CREATE_INTENT.search(current_message) is not None
+            or (epic_requested and decomposition_requested)
+        )
+        attach_requested = (
+            _EXPLICIT_ATTACH_INTENT.search(current_message) is not None
+            or (decomposition_requested and (task_requested or epic_requested))
+        )
+        allowed_mutations = {
+            "create_task": task_requested
+            and _NEGATED_TASK_CREATE_INTENT.search(current_message) is None,
+            "create_epic": epic_requested
+            and _NEGATED_EPIC_CREATE_INTENT.search(current_message) is None,
+            "add_child_task": attach_requested
+            and _NEGATED_ATTACH_INTENT.search(current_message) is None,
+        }
         return tuple(
-            tool for tool in effective if tool not in self.mutation_tool_capabilities
+            tool
+            for tool in effective
+            if tool not in self.mutation_tool_capabilities
+            or allowed_mutations.get(tool, False)
         )
 
 

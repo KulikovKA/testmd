@@ -20,7 +20,7 @@ const allowed = new Set(
     .split(",")
     .filter((name) => name === "get_task"
       || name === "add_child_task"
-      || (name === "create_task" && validDefaultOwner())),
+      || ((name === "create_task" || name === "create_epic") && validDefaultOwner())),
 );
 let sessionCookie = null;
 
@@ -232,7 +232,7 @@ async function getTask(entityNumber) {
   return normalizeTask(payload);
 }
 
-async function createTask(input) {
+async function createEntity(input, expectedType) {
   if (!sessionCookie) await login();
   const url = new URL("/app/tasks/api/v1/entities", baseUrl);
   const body = JSON.stringify({
@@ -242,7 +242,7 @@ async function createTask(input) {
     owner: defaultOwner,
     priority: input.priority,
     status: "created",
-    type: "task",
+    type: expectedType,
   });
   let { response, raw } = await fetchWithTimeout(url, {
     method: "POST",
@@ -265,7 +265,16 @@ async function createTask(input) {
   try { payload = JSON.parse(raw); } catch { throw new Error("invalid_schema"); }
   const created = normalizeCreateResponse(payload);
   const { children: _children, ...normalized } = await getTask(created.number);
+  if (normalized.type !== expectedType) throw new Error("create_verification_failed");
   return normalized;
+}
+
+async function createTask(input) {
+  return createEntity(input, "task");
+}
+
+async function createEpic(input) {
+  return createEntity(input, "epic");
 }
 
 function childRelationResult(parent, child) {
@@ -346,6 +355,7 @@ async function addChildTask(input) {
   const parent = await getRelationState(input.parent_epic);
   if (parent.type !== "epic") throw new Error("parent_not_epic");
   const child = await getTask(input.child_task);
+  if (child.type !== "task") throw new Error("child_not_task");
   if (parent.children.includes(child.number)) {
     return childRelationResult(parent, child);
   }
@@ -373,15 +383,18 @@ async function call(name, input) {
   if (!validConfiguration()) return diagnostic("service_failure", "Sfera deployment configuration is invalid");
   if (name === "get_task" && (!object(input) || Object.keys(input).length !== 1 || !validEntityNumber(input.entity_number))) return diagnostic("invalid_input", "entity_number is invalid");
   if (name === "create_task" && (!validDefaultOwner() || !validCreateInput(input))) return diagnostic("invalid_input", "Task creation input is invalid");
+  if (name === "create_epic" && (!validDefaultOwner() || !validCreateInput(input))) return diagnostic("invalid_input", "Epic creation input is invalid");
   if (name === "add_child_task" && !validAddChildInput(input)) return diagnostic("invalid_input", "Epic and child Task numbers are invalid");
-  if (name !== "get_task" && name !== "create_task" && name !== "add_child_task") return diagnostic("capability_denied", "operation is not enabled for this Agent");
+  if (name !== "get_task" && name !== "create_task" && name !== "create_epic" && name !== "add_child_task") return diagnostic("capability_denied", "operation is not enabled for this Agent");
   try {
     return textResult(
       name === "get_task"
         ? await getTask(input.entity_number)
         : name === "create_task"
           ? await createTask(input)
-          : await addChildTask(input),
+          : name === "create_epic"
+            ? await createEpic(input)
+            : await addChildTask(input),
     );
   }
   catch (error) {
@@ -392,7 +405,9 @@ async function call(name, input) {
       timeout: "Sfera request timed out",
       response_limit: "Sfera response exceeded the configured limit",
       invalid_schema: "Sfera returned an invalid response",
+      create_verification_failed: "Sfera did not create the requested entity type",
       parent_not_epic: "Only Epic entities support child decomposition",
+      child_not_task: "Only ordinary Task entities can be attached as decomposition children",
       relation_verification_failed: "Sfera did not confirm the child relation",
     };
     return diagnostic(Object.hasOwn(messages, code) ? code : "service_failure", messages[code] || "Sfera service is unavailable");
@@ -417,6 +432,11 @@ const createDefinition = {
       priority: { type: "string", enum: ["low", "average"] },
     },
   },
+};
+
+const createEpicDefinition = {
+  description: "Create one Sfera Epic in an existing area.",
+  inputSchema: createDefinition.inputSchema,
 };
 
 const addChildDefinition = {
@@ -454,6 +474,7 @@ function startStdioServer() {
         if (request.method === "tools/list") return reply(id, { tools: [
           ...(allowed.has("get_task") ? [{ name: "get_task", ...definition }] : []),
           ...(allowed.has("create_task") ? [{ name: "create_task", ...createDefinition }] : []),
+          ...(allowed.has("create_epic") ? [{ name: "create_epic", ...createEpicDefinition }] : []),
           ...(allowed.has("add_child_task") ? [{ name: "add_child_task", ...addChildDefinition }] : []),
         ] });
         if (request.method === "tools/call") return reply(id, await call(request.params?.name, request.params?.arguments));

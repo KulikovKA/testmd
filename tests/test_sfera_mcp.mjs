@@ -240,8 +240,16 @@ test("create_task is visible only with its capability and configured owner", asy
     response.writeHead(500).end();
   }, async (mcp) => {
     const listed = await mcp.request("tools/list", {});
-    assert.deepEqual(listed.result.tools.map((tool) => tool.name), ["get_task"]);
-  }, { capabilities: "get_task,create_task,add_child_task" });
+    assert.deepEqual(listed.result.tools.map((tool) => tool.name), ["get_task", "add_child_task"]);
+  }, { capabilities: "get_task,create_task,create_epic,add_child_task" });
+
+  await withMcp(async (request, response) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    response.writeHead(500).end();
+  }, async (mcp) => {
+    const listed = await mcp.request("tools/list", {});
+    assert.deepEqual(listed.result.tools.map((tool) => tool.name), ["get_task", "create_task", "create_epic", "add_child_task"]);
+  }, { capabilities: "get_task,create_task,create_epic,add_child_task", defaultOwner: "sfera-admin" });
 
   await withMcp(async (request, response) => {
     if (request.url === "/app/ppau/api/auth/login") return login(response);
@@ -265,6 +273,22 @@ const createdTask = {
   number: "TTEST2-97",
   name: createInput.name,
   description: "<p>Первая строка<br>Вторая &amp; строка</p>",
+};
+
+const createEpicInput = {
+  area: "TTEST2",
+  name: "Новый Epic",
+  description: "Первая строка\nВторая & строка",
+  priority: "average",
+};
+
+const createdEpic = {
+  ...task,
+  id: "230",
+  number: "TTEST2-101",
+  name: createEpicInput.name,
+  description: "<p>Первая строка<br>Вторая &amp; строка</p>",
+  type: { identifier: "epic", name: "Эпик" },
 };
 
 const epic = {
@@ -324,6 +348,70 @@ test("create_task posts a fixed ordinary-Task payload and returns normalized dat
     assert.equal(calls.filter((call) => call.path === "/app/ppau/api/auth/login").length, 1);
   }, { capabilities: "get_task,create_task", defaultOwner: "sfera-admin" });
 });
+
+test("create_epic posts a fixed Epic payload and returns a verified Epic", async () => {
+  await withMcp(async (request, response, calls) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    if (request.url === "/app/tasks/api/v1/entities") {
+      assert.equal(request.method, "POST");
+      assert.match(request.headers.cookie, /SESSION=one/);
+      assert.deepEqual(JSON.parse(calls.at(-1).body), {
+        area: "TTEST2",
+        description: "<p>Первая строка<br>Вторая &amp; строка</p>",
+        name: "Новый Epic",
+        owner: "sfera-admin",
+        priority: "average",
+        status: "created",
+        type: "epic",
+      });
+      response.writeHead(201, { "content-type": "application/json" });
+      return response.end(JSON.stringify({ number: "TTEST2-101" }));
+    }
+    assert.equal(request.method, "GET");
+    assert.equal(request.url, "/app/tasks/api/v1/entity-views/TTEST2-101");
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(createdEpic));
+  }, async (mcp) => {
+    const response = await mcp.request("tools/call", { name: "create_epic", arguments: createEpicInput });
+    const payload = result(response);
+    assert.equal(payload.number, "TTEST2-101");
+    assert.equal(payload.type, "epic");
+    assert.equal(payload.children, undefined);
+  }, { capabilities: "create_epic", defaultOwner: "sfera-admin" });
+});
+
+test("create_epic rejects a mismatched read-after-write type without repeating POST", async () => {
+  let posts = 0;
+  await withMcp(async (request, response) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    if (request.url === "/app/tasks/api/v1/entities") {
+      posts += 1;
+      response.writeHead(201, { "content-type": "application/json" });
+      return response.end(JSON.stringify({ number: "TTEST2-101" }));
+    }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ ...createdTask, number: "TTEST2-101" }));
+  }, async (mcp) => {
+    const response = await mcp.request("tools/call", { name: "create_epic", arguments: createEpicInput });
+    assert.equal(result(response).error.code, "create_verification_failed");
+    assert.equal(posts, 1);
+  }, { capabilities: "create_epic", defaultOwner: "sfera-admin" });
+});
+
+for (const argumentsValue of [
+  { ...createEpicInput, type: "task" },
+  { ...createEpicInput, owner: "untrusted" },
+  { ...createEpicInput, status: "created" },
+  { ...createEpicInput, extra: "untrusted" },
+]) {
+  test("create_epic rejects model-controlled mutation fields before a request", async () => {
+    await withMcp(async (_request, response) => response.writeHead(500).end(), async (mcp, calls) => {
+      const response = await mcp.request("tools/call", { name: "create_epic", arguments: argumentsValue });
+      assert.equal(result(response).error.code, "invalid_input");
+      assert.equal(calls.length, 0);
+    }, { capabilities: "create_epic", defaultOwner: "sfera-admin" });
+  });
+}
 
 test("create_task normalizes a numeric Sfera id", async () => {
   await withMcp(async (request, response) => {
@@ -460,6 +548,23 @@ test("add_child_task rejects a non-Epic parent before any mutation", async () =>
     assert.equal(calls.filter((call) => call.method === "POST" && call.path !== "/app/ppau/api/auth/login").length, 0);
     assert.equal(calls.filter((call) => call.method === "PATCH").length, 0);
     assert.equal(calls.filter((call) => call.path === "/app/tasks/api/v1/entity-views/TTEST2-107").length, 0);
+  }, { capabilities: "get_task,add_child_task" });
+});
+
+test("add_child_task rejects an Epic child before PATCH", async () => {
+  await withMcp(async (request, response) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    if (request.url === "/app/tasks/api/v1/entities/TTEST2-106") {
+      response.writeHead(200, { "content-type": "application/json" });
+      return response.end(JSON.stringify(relationState(epic)));
+    }
+    assert.equal(request.url, "/app/tasks/api/v1/entity-views/TTEST2-107");
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ ...createdEpic, number: "TTEST2-107" }));
+  }, async (mcp, calls) => {
+    const response = await mcp.request("tools/call", { name: "add_child_task", arguments: addChildInput });
+    assert.equal(result(response).error.code, "child_not_task");
+    assert.equal(calls.filter((call) => call.method === "PATCH").length, 0);
   }, { capabilities: "get_task,add_child_task" });
 });
 

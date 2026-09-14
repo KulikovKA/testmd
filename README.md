@@ -35,9 +35,9 @@ microVM от create до delete; между сообщениями microVM не 
 ## Sfera
 
 При заданных `UAR_SFERA_*` Agent получает `get_task`; при дополнительно заданном
-`UAR_SFERA_DEFAULT_OWNER` capability `create_task` создаёт только обычную Task.
-Skill `task-decomposition` допускает `create_task` и `add_child_task` только при
-явном текущем намерении пользователя создать декомпозицию. Перед любой mutation
+`UAR_SFERA_DEFAULT_OWNER` capability `create_task` создаёт только обычную Task,
+а `create_epic` — только Epic. Skill `task-decomposition` допускает mutation
+Tools только при явном текущем намерении пользователя. Перед декомпозицией он
 он читает исходную сущность: создавать и привязывать дочерние задачи разрешено
 только если `type` исходной сущности равен `epic`. Обычный запрос на
 анализ или предложение декомпозиции не получает mutation Tools.
@@ -58,14 +58,20 @@ Orchestrator копирует PEM в его изолированный workspace
 через `NODE_EXTRA_CA_CERTS`. Это добавляет trust anchor и не отключает системную
 TLS-проверку. Если переменная не задана, Node использует только стандартный
 системный trust store.
-Поддерживаются `get_task`, `create_task` и `add_child_task`. `create_task`
-фиксирует `status=created` и `type=task`. `add_child_task` строго проверяет
+Граница capabilities: `get_task` только читает; `create_task` создаёт только
+обычную Task; `create_epic` создаёт только Epic; `add_child_task` привязывает
+только обычную Task к Epic. Оба creation Tools фиксируют `status=created`,
+owner из deployment configuration и свой trusted type. `add_child_task` строго проверяет
 существование Epic и Task через фиксированные Sfera endpoints. Если связи ещё
 нет, MCP отправляет только `PATCH /app/tasks/api/v1/entities/{parentEpic}` с
 payload `{"children":["childTask"]}`, затем повторно читает Epic и сообщает
 успех только после появления child в `children`. Уже существующая связь не
 вызывает PATCH. Не поддерживаются `update_task`, `delete_task` и
 `create_subtask`.
+
+Полный flow для нового Epic: `create_epic` → `create_task` →
+`add_child_task` → `get_task` с verification children. Model не задаёт type,
+owner, URL, HTTP method или headers.
 
 `task-decomposition` остаётся независимым от Tool: с пустым списком Tools он
 составляет план, а с `get_task` может дополнительно прочитать задачу.
