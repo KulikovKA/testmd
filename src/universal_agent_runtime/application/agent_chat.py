@@ -1,6 +1,7 @@
 """Bounded non-streaming turns with process-local, per-Agent coordination."""
 
 import asyncio
+import time
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -26,6 +27,7 @@ from universal_agent_runtime.application.ports.interaction_values import TurnReq
 from universal_agent_runtime.domain.agent import AgentLifecycleState as State
 from universal_agent_runtime.domain.identifiers import AgentId
 from universal_agent_runtime.domain.message import Message
+from universal_agent_runtime.benchmarking import emit_benchmark_metric
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,7 @@ class ChatConfiguration:
     max_history_messages: int = 100
     max_history_page_size: int = 50
     redacted_values: tuple[str, ...] = field(default=(), repr=False)
+    benchmark_timing_enabled: bool = False
 
     def __post_init__(self) -> None:
         for value in (
@@ -47,6 +50,8 @@ class ChatConfiguration:
                 raise ValueError("chat limits must be positive integers")
         if self.max_message_characters > 16_384 or self.max_history_messages < 2:
             raise ValueError("invalid chat limits")
+        if type(self.benchmark_timing_enabled) is not bool:
+            raise ValueError("benchmark_timing_enabled must be a bool")
 
 
 @dataclass(frozen=True)
@@ -178,8 +183,22 @@ class AgentChatService:
         self, record: AgentRecord, request: TurnRequest, turn_id: str
     ) -> tuple[Message, ...]:
         started = datetime.now(UTC)
+        turn_started_ns = time.perf_counter_ns() if self._configuration.benchmark_timing_enabled else 0
         try:
-            result = await self._interaction.turn(request)
+            interaction_started_ns = time.perf_counter_ns() if self._configuration.benchmark_timing_enabled else 0
+            try:
+                result = await self._interaction.turn(request)
+            finally:
+                if interaction_started_ns:
+                    emit_benchmark_metric(
+                        True,
+                        "agent_interaction",
+                        duration_ms=round(
+                            (time.perf_counter_ns() - interaction_started_ns)
+                            / 1_000_000,
+                            3,
+                        ),
+                    )
             if (
                 result.session != record.session
                 or result.completed_turns != len(record.messages) // 2 + 1
@@ -238,6 +257,17 @@ class AgentChatService:
             raise self._fail(
                 record, Code.INTERACTION_FAILED, recoverable=False
             ) from None
+        finally:
+            if turn_started_ns:
+                duration_ms = round(
+                    (time.perf_counter_ns() - turn_started_ns) / 1_000_000, 3
+                )
+                emit_benchmark_metric(
+                    True,
+                    "agent_turn",
+                    duration_ms=duration_ms,
+                    agent_application_ms=duration_ms,
+                )
 
     async def close(self) -> None:
         if self._pending:

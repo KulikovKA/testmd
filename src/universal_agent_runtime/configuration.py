@@ -62,6 +62,15 @@ def _positive_int(environment: Mapping[str, str], name: str) -> int:
     return value
 
 
+def _boolean(environment: Mapping[str, str], name: str) -> bool:
+    raw = environment.get(name, "false").strip().lower()
+    if raw == "true":
+        return True
+    if raw == "false":
+        return False
+    raise ConfigurationError(f"{name} must be true or false")
+
+
 def _identifier(environment: Mapping[str, str], name: str) -> str:
     value = _required(environment, name)
     if len(value) > 64 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", value):
@@ -166,6 +175,7 @@ class ApplicationSettings:
     qwen_reasoning_directive: str = "/think"
     qwen_request_timeout_seconds: int = 600
     qwen_wall_time_seconds: int = 900
+    benchmark_timing_enabled: bool = False
     sfera_base_url: str | None = None
     sfera_username_secret_id: str | None = None
     sfera_username: str | None = field(default=None, repr=False)
@@ -247,6 +257,8 @@ class ApplicationSettings:
         ):
             if type(value) is not int or value < 1:
                 raise ConfigurationError(f"{name} must be a positive integer")
+        if type(self.benchmark_timing_enabled) is not bool:
+            raise ConfigurationError("UAR_BENCHMARK_TIMING_ENABLED must be true or false")
         if self.sfera_username_secret_id is not None:
             _identifier(
                 {"UAR_SFERA_USERNAME_SECRET_ID": self.sfera_username_secret_id},
@@ -362,6 +374,7 @@ class ApplicationSettings:
                 {"UAR_QWEN_WALL_TIME_SECONDS": "900", **values},
                 "UAR_QWEN_WALL_TIME_SECONDS",
             ),
+            benchmark_timing_enabled=_boolean(values, "UAR_BENCHMARK_TIMING_ENABLED"),
             sfera_base_url=_optional_sfera_endpoint(values),
             sfera_username_secret_id=sfera_username_secret_id or None,
             sfera_username=sfera_username or None,

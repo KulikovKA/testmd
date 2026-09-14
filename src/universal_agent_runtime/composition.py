@@ -103,6 +103,7 @@ def compose_application(
                 )
                 if value
             ),
+            benchmark_timing_enabled=settings.benchmark_timing_enabled,
         ),
     )
     return ApplicationComposition(settings, runtime, interaction, lifecycle, chat)
@@ -182,6 +183,7 @@ def _compose_interaction(settings: ApplicationSettings) -> AgentInteraction:
         sfera_ca_cert_path=settings.sfera_ca_cert_path,
         sfera_timeout_seconds=settings.sfera_timeout_seconds,
         sfera_max_response_bytes=settings.sfera_max_response_bytes,
+        benchmark_timing_enabled=settings.benchmark_timing_enabled,
         task_mcp_server_path=(
             f"{settings.docker_workspace_target}/.uar-tools/task_rest_mcp_server.mjs"
         ),

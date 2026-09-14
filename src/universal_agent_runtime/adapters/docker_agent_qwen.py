@@ -2,6 +2,7 @@
 
 import io
 import tarfile
+import time
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -18,6 +19,10 @@ from universal_agent_runtime.adapters.qwen_session import (
     QwenRunnerFailure,
     QwenSessionConfig,
     _classify_runner_output,
+    _emit_mcp_metrics,
+    _emit_mcp_summary,
+    _emit_qwen_metric,
+    _extract_mcp_metrics,
     _parse_qwen_output,
 )
 from universal_agent_runtime.adapters.qwen_session import (
@@ -57,6 +62,9 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
 
     def run(self, invocation: QwenInvocation) -> QwenExecution:
         agent_id = AgentId(invocation.workspace.parent.name)
+        started_ns = time.perf_counter_ns() if self._config.benchmark_timing_enabled else 0
+        execution_started_ns = 0
+        metric_output: str | None = None
         prefix = "io.universal-agent-runtime"
         home = f"{self._workspace_target}/.qwen-home"
         try:
@@ -167,6 +175,9 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
                         bundle.addfile(info)
             if not container.put_archive(self._workspace_target, archive.getvalue()):
                 raise QwenRunnerFailure(Code.OPERATION_FAILED)
+            execution_started_ns = (
+                time.perf_counter_ns() if self._config.benchmark_timing_enabled else 0
+            )
             outcome = container.exec_run(
                 self.command(invocation),
                 workdir=self._workspace_target,
@@ -176,17 +187,26 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
                     "OLLAMA_API_KEY": self._config.api_key,
                     "OPENAI_API_KEY": self._config.api_key,
                     "UAR_AGENT_TOOL_CAPABILITIES": ",".join(invocation.task_operations),
+                    **(
+                        {"UAR_BENCHMARK_TIMING_ENABLED": "true"}
+                        if self._config.benchmark_timing_enabled
+                        else {}
+                    ),
                     **self._task_environment(invocation.task_operations),
                 },
             )
             if not isinstance(outcome.output, bytes):
                 raise QwenRunnerFailure(Code.PROTOCOL_FAILURE)
             output = outcome.output.decode("utf-8", errors="replace")
+            clean_output, mcp_metrics = _extract_mcp_metrics(output)
+            metric_output = clean_output
+            _emit_mcp_metrics(self._config.benchmark_timing_enabled, mcp_metrics)
+            _emit_mcp_summary(self._config.benchmark_timing_enabled, mcp_metrics)
             if outcome.exit_code == 55:
                 raise QwenRunnerFailure(Code.TIMEOUT)
             if outcome.exit_code != 0:
-                raise QwenRunnerFailure(_classify_runner_output(output))
-            execution = _parse_qwen_output(output, invocation.native_session_id)
+                raise QwenRunnerFailure(_classify_runner_output(clean_output))
+            execution = _parse_qwen_output(clean_output, invocation.native_session_id)
             chunks, _ = container.get_archive(home)
             self._receive(invocation, chunks)
             return execution
@@ -194,6 +214,13 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
             raise
         except (DockerException, OSError, ValueError, tarfile.TarError):
             raise QwenRunnerFailure(Code.OPERATION_FAILED) from None
+        finally:
+            _emit_qwen_metric(
+                self._config.benchmark_timing_enabled,
+                started_ns,
+                metric_output,
+                execution_started_ns,
+            )
 
     def _environment_values(self, container: object) -> dict[str, str]:
         environment = getattr(container, "attrs", {}).get("Config", {}).get("Env", [])

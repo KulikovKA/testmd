@@ -44,6 +44,7 @@ class McpClient {
     maxResponseBytes = "65536",
     capabilities = "get_task",
     defaultOwner = "",
+    benchmark = false,
   } = {}) {
     this.child = spawn(process.execPath, [serverPath], {
       env: {
@@ -54,6 +55,7 @@ class McpClient {
         UAR_SFERA_TIMEOUT_MS: "1000",
         UAR_SFERA_MAX_RESPONSE_BYTES: maxResponseBytes,
         UAR_AGENT_TOOL_CAPABILITIES: capabilities,
+        ...(benchmark ? { UAR_BENCHMARK_TIMING_ENABLED: "true" } : {}),
         ...(defaultOwner ? { UAR_SFERA_DEFAULT_OWNER: defaultOwner } : {}),
       },
       stdio: ["pipe", "pipe", "pipe"],
@@ -61,6 +63,8 @@ class McpClient {
     this.nextId = 1;
     this.buffer = "";
     this.pending = new Map();
+    this.metrics = [];
+    this.stderrBuffer = "";
     this.child.stdout.setEncoding("utf8");
     this.child.stdout.on("data", (chunk) => {
       this.buffer += chunk;
@@ -74,6 +78,17 @@ class McpClient {
           this.pending.delete(response.id);
           resolve(response);
         }
+      }
+    });
+    this.child.stderr.setEncoding("utf8");
+    this.child.stderr.on("data", (chunk) => {
+      this.stderrBuffer += chunk;
+      let end;
+      while ((end = this.stderrBuffer.indexOf("\n")) >= 0) {
+        const line = this.stderrBuffer.slice(0, end);
+        this.stderrBuffer = this.stderrBuffer.slice(end + 1);
+        if (!line.startsWith("UAR_METRIC ")) continue;
+        this.metrics.push(JSON.parse(line.slice("UAR_METRIC ".length)));
       }
     });
   }
@@ -119,6 +134,26 @@ function login(response, value = "one") {
   response.writeHead(200, { "Set-Cookie": [`SESSION=${value}; HttpOnly`, `ROUTE=${value}; Path=/`] });
   response.end("{}");
 }
+
+test("benchmark mode emits only structured MCP and normalized Sfera HTTP metrics on stderr", async () => {
+  await withMcp(async (request, response) => {
+    if (request.url === "/app/ppau/api/auth/login") return login(response);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(task));
+  }, async (mcp) => {
+    const response = await mcp.request("tools/call", { name: "get_task", arguments: { entity_number: "TTEST2-94" } });
+    assert.equal(result(response).number, "TTEST2-94");
+    await new Promise((resolve) => setImmediate(resolve));
+    const tool = mcp.metrics.find((metric) => metric.kind === "mcp_tool");
+    const entity = mcp.metrics.find((metric) => metric.route === "entity_view_get");
+    assert.deepEqual(Object.keys(tool).sort(), ["duration_ms", "kind", "success", "tool_name"]);
+    assert.equal(tool.tool_name, "get_task");
+    assert.equal(entity.method, "GET");
+    assert.equal(entity.status_code, 200);
+    assert.equal(entity.success, true);
+    assert.doesNotMatch(JSON.stringify(mcp.metrics), /TTEST2-94|sfera-password-must-not-leak/);
+  }, { benchmark: true });
+});
 
 async function requestOptionsFor(extraCaPath) {
   const original = process.env.NODE_EXTRA_CA_CERTS;

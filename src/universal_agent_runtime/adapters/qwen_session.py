@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import shutil
+import time
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path, PurePosixPath
@@ -31,6 +32,7 @@ from universal_agent_runtime.application.ports.interaction_values import (
     TurnResult,
 )
 from universal_agent_runtime.domain.identifiers import validate_identifier
+from universal_agent_runtime.benchmarking import emit_benchmark_metric
 
 QWEN_CODE_VERSION = "0.23.1"
 QWEN_IMAGE = (
@@ -92,6 +94,7 @@ class QwenSessionConfig:
     task_mcp_server_path: str = "/workspace/.uar-tools/task_rest_mcp_server.mjs"
     task_mcp_config_path: str = "/root/.qwen/task-mcp-config.json"
     reasoning_directive: str = "/think"
+    benchmark_timing_enabled: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.storage_root, Path):
@@ -171,6 +174,8 @@ class QwenSessionConfig:
             raise ValueError("Task MCP configuration is invalid")
         if self.reasoning_directive not in {"/think", "/no_think"}:
             raise ValueError("reasoning_directive must be /think or /no_think")
+        if type(self.benchmark_timing_enabled) is not bool:
+            raise ValueError("benchmark_timing_enabled must be a bool")
 
     @property
     def sfera_ca_cert_container_path(self) -> str:
@@ -286,12 +291,17 @@ class DockerQwenCommandRunner:
     def run(self, invocation: QwenInvocation) -> QwenExecution:
         command = self.command(invocation)
         container = None
+        started_ns = time.perf_counter_ns() if self._config.benchmark_timing_enabled else 0
+        execution_started_ns = 0
+        metric_output: str | None = None
         try:
             environment = {
                 "OLLAMA_API_KEY": self._config.api_key,
                 "OPENAI_API_KEY": self._config.api_key,
                 "UAR_AGENT_TOOL_CAPABILITIES": ",".join(invocation.task_operations),
             }
+            if self._config.benchmark_timing_enabled:
+                environment["UAR_BENCHMARK_TIMING_ENABLED"] = "true"
             if invocation.task_operations and self._config.sfera_base_url is not None:
                 environment.update(
                     {
@@ -324,6 +334,9 @@ class DockerQwenCommandRunner:
                 environment["NODE_EXTRA_CA_CERTS"] = (
                     self._config.sfera_ca_cert_container_path
                 )
+            execution_started_ns = (
+                time.perf_counter_ns() if self._config.benchmark_timing_enabled else 0
+            )
             container = self._client.containers.run(
                 self._config.image,
                 command,
@@ -345,12 +358,17 @@ class DockerQwenCommandRunner:
             output = container.logs(stdout=True, stderr=True).decode(
                 "utf-8", errors="replace"
             )
+            clean_output, mcp_metrics = _extract_mcp_metrics(output)
+            metric_output = clean_output
+            _emit_mcp_metrics(self._config.benchmark_timing_enabled, mcp_metrics)
+            _emit_mcp_summary(self._config.benchmark_timing_enabled, mcp_metrics)
             status = int(wait_result["StatusCode"])
             if status == 55:
                 raise QwenRunnerFailure(QwenRunnerErrorCode.TIMEOUT)
             if status != 0:
-                raise QwenRunnerFailure(_classify_runner_output(output))
-            return _parse_qwen_output(output, invocation.native_session_id)
+                raise QwenRunnerFailure(_classify_runner_output(clean_output))
+            execution = _parse_qwen_output(clean_output, invocation.native_session_id)
+            return execution
         except QwenRunnerFailure:
             raise
         except (
@@ -363,6 +381,13 @@ class DockerQwenCommandRunner:
         ):
             raise QwenRunnerFailure(QwenRunnerErrorCode.OPERATION_FAILED) from None
         finally:
+            if started_ns:
+                _emit_qwen_metric(
+                    self._config.benchmark_timing_enabled,
+                    started_ns,
+                    metric_output,
+                    execution_started_ns,
+                )
             if container is not None:
                 try:
                     container.remove(force=True)
@@ -434,6 +459,130 @@ def _parse_qwen_output(output: str, expected: UUID) -> QwenExecution:
     if response.lstrip().startswith("[API Error:"):
         raise QwenRunnerFailure(QwenRunnerErrorCode.INFERENCE_UNAVAILABLE)
     return QwenExecution(actual, response)
+
+
+def _extract_mcp_metrics(output: str) -> tuple[str, tuple[dict[str, Any], ...]]:
+    """Remove only valid MCP stderr metrics from a combined Docker output stream."""
+
+    clean: list[str] = []
+    metrics: list[dict[str, Any]] = []
+    for line in output.splitlines():
+        if not line.startswith("UAR_METRIC "):
+            clean.append(line)
+            continue
+        try:
+            value = json.loads(line.removeprefix("UAR_METRIC "))
+        except json.JSONDecodeError:
+            clean.append(line)
+            continue
+        if not isinstance(value, dict) or value.get("kind") not in {
+            "mcp_tool",
+            "sfera_http",
+        }:
+            clean.append(line)
+            continue
+        metrics.append(value)
+    return "\n".join(clean), tuple(metrics)
+
+
+def _emit_mcp_metrics(enabled: bool, metrics: tuple[dict[str, Any], ...]) -> None:
+    for metric in metrics:
+        duration = metric.get("duration_ms")
+        success = metric.get("success")
+        if (
+            type(duration) not in {int, float}
+            or duration < 0
+            or type(success) is not bool
+        ):
+            continue
+        kind = metric["kind"]
+        if kind == "mcp_tool":
+            name = metric.get("tool_name")
+            if name not in TASK_TOOL_OPERATIONS:
+                continue
+            emit_benchmark_metric(
+                enabled, kind, tool_name=name, duration_ms=duration, success=success
+            )
+            continue
+        route = metric.get("route")
+        method = metric.get("method")
+        status = metric.get("status_code")
+        status_class = metric.get("status_class")
+        if (
+            route not in {"login", "entity_view_get", "entity_get", "entity_create", "entity_patch"}
+            or method not in {"GET", "POST", "PATCH"}
+            or (status is not None and (type(status) is not int or not 100 <= status <= 599))
+            or status_class not in {"2xx", "3xx", "4xx", "5xx", "error"}
+        ):
+            continue
+        emit_benchmark_metric(
+            enabled,
+            kind,
+            route=route,
+            method=method,
+            duration_ms=duration,
+            status_code=status,
+            status_class=status_class,
+            success=success,
+        )
+
+
+def _emit_mcp_summary(enabled: bool, metrics: tuple[dict[str, Any], ...]) -> None:
+    if not enabled:
+        return
+    calls = [metric for metric in metrics if metric.get("kind") == "mcp_tool"]
+    by_tool: dict[str, int] = {}
+    total_ms = 0.0
+    for call in calls:
+        name, duration = call.get("tool_name"), call.get("duration_ms")
+        if name in TASK_TOOL_OPERATIONS and type(duration) in {int, float}:
+            by_tool[name] = by_tool.get(name, 0) + 1
+            total_ms += duration
+    emit_benchmark_metric(
+        True,
+        "mcp_summary",
+        mcp_calls_total=sum(by_tool.values()),
+        mcp_total_ms=round(total_ms, 3),
+        mcp_calls_by_tool=by_tool,
+    )
+
+
+def _emit_qwen_metric(
+    enabled: bool,
+    started_ns: int,
+    output: str | None,
+    execution_started_ns: int = 0,
+) -> None:
+    if not enabled or not started_ns:
+        return
+    values: dict[str, Any] = {
+        "qwen_total_ms": round((time.perf_counter_ns() - started_ns) / 1_000_000, 3),
+        "backend_inference_requests_observable": False,
+        "backend_inference_requests": None,
+    }
+    if execution_started_ns:
+        values["qwen_execution_ms"] = round(
+            (time.perf_counter_ns() - execution_started_ns) / 1_000_000, 3
+        )
+    if output is not None:
+        event_types: dict[str, int] = {}
+        for line in output.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            event_type = event.get("type") if isinstance(event, dict) else None
+            if event_type in {
+                "init",
+                "message",
+                "tool_call",
+                "tool_result",
+                "result",
+                "error",
+            }:
+                event_types[event_type] = event_types.get(event_type, 0) + 1
+        values["stream_json_event_types"] = event_types
+    emit_benchmark_metric(True, "qwen_execution", **values)
 
 
 class QwenSessionAdapter:

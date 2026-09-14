@@ -195,6 +195,23 @@ class RuntimeDriverConfigurationTests(unittest.TestCase):
                         {**_environment("docker"), name: "0"}
                     )
 
+    def test_benchmark_timing_flag_defaults_false_and_maps_to_qwen(self) -> None:
+        defaults = ApplicationSettings.from_environment(_environment("docker"))
+        self.assertFalse(defaults.benchmark_timing_enabled)
+        settings = ApplicationSettings.from_environment(
+            {**_environment("docker"), "UAR_BENCHMARK_TIMING_ENABLED": "true"}
+        )
+        with patch(
+            "universal_agent_runtime.adapters.qwen_session.docker.from_env",
+            return_value=object(),
+        ):
+            interaction = _compose_interaction(settings)
+        self.assertTrue(interaction._config.benchmark_timing_enabled)
+        with self.assertRaisesRegex(ConfigurationError, "UAR_BENCHMARK_TIMING_ENABLED"):
+            ApplicationSettings.from_environment(
+                {**_environment("docker"), "UAR_BENCHMARK_TIMING_ENABLED": "yes"}
+            )
+
     def test_sfera_credentials_are_required_as_a_pair_and_redacted_from_repr(self) -> None:
         settings = ApplicationSettings.from_environment(
             {

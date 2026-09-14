@@ -15,6 +15,7 @@ const username = process.env.UAR_SFERA_USERNAME || "";
 const password = process.env.UAR_SFERA_PASSWORD || "";
 const defaultOwner = process.env.UAR_SFERA_DEFAULT_OWNER || "";
 const customCaPath = process.env.NODE_EXTRA_CA_CERTS || "";
+const benchmarkTimingEnabled = process.env.UAR_BENCHMARK_TIMING_ENABLED === "true";
 const allowed = new Set(
   (process.env.UAR_AGENT_TOOL_CAPABILITIES || "")
     .split(",")
@@ -23,6 +24,24 @@ const allowed = new Set(
       || ((name === "create_task" || name === "create_epic") && validDefaultOwner())),
 );
 let sessionCookie = null;
+
+function durationMs(started) {
+  return Number(process.hrtime.bigint() - started) / 1_000_000;
+}
+
+function metric(value) {
+  if (benchmarkTimingEnabled) process.stderr.write(`UAR_METRIC ${JSON.stringify(value)}\n`);
+}
+
+function routeClass(url) {
+  if (url.pathname === "/app/ppau/api/auth/login") return "login";
+  if (/^\/app\/tasks\/api\/v1\/entity-views\/[A-Z0-9-]+$/.test(url.pathname)) return "entity_view_get";
+  if (url.pathname === "/app/tasks/api/v1/entities") return "entity_create";
+  if (/^\/app\/tasks\/api\/v1\/entities\/[A-Z0-9-]+$/.test(url.pathname)) {
+    return String(url.pathname).includes("/entities/") && url ? "entity_get_or_patch" : "unknown";
+  }
+  return "unknown";
+}
 
 function parseBaseUrl(value) {
   try {
@@ -127,6 +146,10 @@ export function sferaRequestOptions(url, options) {
 }
 
 async function fetchWithTimeout(url, options) {
+  const started = process.hrtime.bigint();
+  const route = routeClass(url) === "entity_get_or_patch"
+    ? (options.method === "PATCH" ? "entity_patch" : "entity_get")
+    : routeClass(url);
   let request;
   const response = new Promise((resolveResponse, rejectResponse) => {
     const transport = url.protocol === "https:" ? https : http;
@@ -140,7 +163,13 @@ async function fetchWithTimeout(url, options) {
   const timer = setTimeout(() => request?.destroy(timeout), TIMEOUT_MS);
   try {
     const incoming = await response;
-    return { response: incoming, raw: await readResponse(incoming) };
+    const raw = await readResponse(incoming);
+    metric({ kind: "sfera_http", route, method: options.method, duration_ms: durationMs(started), status_code: incoming.statusCode, status_class: `${Math.floor(incoming.statusCode / 100)}xx`, success: incoming.statusCode >= 200 && incoming.statusCode < 300 });
+    return { response: incoming, raw };
+  }
+  catch (error) {
+    metric({ kind: "sfera_http", route, method: options.method, duration_ms: durationMs(started), status_code: null, status_class: "error", success: false });
+    throw error;
   }
   finally { clearTimeout(timer); }
 }
@@ -386,8 +415,9 @@ async function call(name, input) {
   if (name === "create_epic" && (!validDefaultOwner() || !validCreateInput(input))) return diagnostic("invalid_input", "Epic creation input is invalid");
   if (name === "add_child_task" && !validAddChildInput(input)) return diagnostic("invalid_input", "Epic and child Task numbers are invalid");
   if (name !== "get_task" && name !== "create_task" && name !== "create_epic" && name !== "add_child_task") return diagnostic("capability_denied", "operation is not enabled for this Agent");
+  const started = process.hrtime.bigint();
   try {
-    return textResult(
+    const result = textResult(
       name === "get_task"
         ? await getTask(input.entity_number)
         : name === "create_task"
@@ -396,8 +426,11 @@ async function call(name, input) {
             ? await createEpic(input)
             : await addChildTask(input),
     );
+    metric({ kind: "mcp_tool", tool_name: name, duration_ms: durationMs(started), success: true });
+    return result;
   }
   catch (error) {
+    metric({ kind: "mcp_tool", tool_name: name, duration_ms: durationMs(started), success: false });
     const code = error?.name === "AbortError" ? "timeout" : error?.message;
     const messages = {
       authentication_failed: "Sfera rejected credentials",

@@ -1,5 +1,11 @@
 # Universal Agent Runtime — серверный запуск
 
+## Benchmarking
+
+Инструментация benchmark включается только через
+`UAR_BENCHMARK_TIMING_ENABLED=true`. Публичный AG-UI-клиент, состав метрик,
+гарантии приватности и команды описаны в [docs/BENCHMARKING.md](docs/BENCHMARKING.md).
+
 Эта ветка содержит deployment-версию Universal Agent Runtime. Она запускает UI,
 Orchestrator и изолированные Agent через Docker daemon. Qwen Code CLI находится
 в `agent_image`, а inference выполняет внешний Ollama
