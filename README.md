@@ -9,7 +9,7 @@
 Эта ветка содержит deployment-версию Universal Agent Runtime. Она запускает UI,
 Orchestrator и изолированные Agent через Docker daemon. Qwen Code CLI находится
 в `agent_image`, а inference выполняет внешний Ollama
-`http://10.21.171.2:11434` с моделью `qwen-3.8-multimodal:latest`; локально
+`http://10.21.171.2:11434` с моделью `qwen3-vl-8b:latest`; локально
 Ollama не устанавливается.
 
 ## Цепочка первого E2E
@@ -145,7 +145,7 @@ UAR_RUNTIME_DRIVER=kata
 UAR_DOCKER_NETWORK_HOST=10.21.171.2
 UAR_DOCKER_NETWORK_PORT=11434
 UAR_QWEN_BASE_URL=http://10.21.171.2:11434/v1
-UAR_QWEN_MODEL=qwen-3.8-multimodal:latest
+UAR_QWEN_MODEL=qwen3-vl-8b:latest
 UAR_QWEN_REASONING_DIRECTIVE=/no_think
 UAR_SFERA_BASE_URL=https://sfera.ai.dev.sfera-t1.ru
 UAR_SFERA_USERNAME_SECRET_ID=sfera-username
