@@ -212,6 +212,9 @@ class _SkillClient:
     def list(self, **_: object) -> list[_SkillContainer]:
         return [self._container]
 
+    def close(self) -> None:
+        return None
+
 
 class _ExecResult:
     def __init__(self, output: bytes) -> None:

@@ -7,8 +7,19 @@ import re
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+from universal_agent_runtime.application.ports.skill_store import (
+    SkillDescriptor,
+    SkillInstallRequest,
+    SkillStoreFailure,
+)
 from universal_agent_runtime.domain.identifiers import validate_identifier
+
+if TYPE_CHECKING:
+    from universal_agent_runtime.adapters.filesystem_skill_registry import (
+        FilesystemSkillRegistry,
+    )
 
 _SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 _MANIFEST_FIELDS = {
@@ -117,13 +128,18 @@ class SkillPackage:
 
 
 class SkillPackageCatalog:
-    """Load immutable built-in assets; Skills never create Tool capabilities."""
+    """Combine built-ins with current installed packages on every lookup."""
 
-    def __init__(self, packages: tuple[SkillPackage, ...]) -> None:
+    def __init__(
+        self,
+        packages: tuple[SkillPackage, ...],
+        registry: FilesystemSkillRegistry | None = None,
+    ) -> None:
         by_identifier = {package.identifier: package for package in packages}
         if len(by_identifier) != len(packages):
             raise SkillPackageError("Skill package IDs must be unique")
         self._packages = by_identifier
+        self._registry = registry
 
     @classmethod
     def builtins(cls) -> SkillPackageCatalog:
@@ -140,6 +156,60 @@ class SkillPackageCatalog:
         )
         return cls(tuple(load_skill_package(package_root) for package_root in package_roots))
 
+    def with_registry(self, registry: FilesystemSkillRegistry) -> SkillPackageCatalog:
+        return SkillPackageCatalog(tuple(self._packages.values()), registry)
+
+    @staticmethod
+    def _descriptor(package: SkillPackage, source_type: str) -> SkillDescriptor:
+        return SkillDescriptor(
+            package.identifier,
+            package.version,
+            package.summary,
+            source_type,
+            package.tool_capabilities,
+            package.mutation_tool_capabilities,
+        )
+
+    def _lookup(self, identifier: str) -> SkillPackage | None:
+        builtin = self._packages.get(identifier)
+        installed = self._registry.get(identifier) if self._registry is not None else None
+        if builtin is not None and installed is not None:
+            raise SkillStoreFailure("skill_registry_unavailable")
+        return builtin or installed
+
+    def list_skills(self) -> tuple[SkillDescriptor, ...]:
+        result = [self._descriptor(package, "builtin") for package in self._packages.values()]
+        if self._registry is not None:
+            for package in self._registry.packages():
+                if package.identifier in self._packages:
+                    raise SkillStoreFailure("skill_registry_unavailable")
+                result.append(
+                    self._descriptor(package, self._registry.source_type(package.identifier))
+                )
+        return tuple(sorted(result, key=lambda item: item.identifier))
+
+    def get_skill(self, identifier: str) -> SkillDescriptor | None:
+        package = self._lookup(identifier)
+        if package is None:
+            return None
+        if identifier in self._packages:
+            source_type = "builtin"
+        else:
+            assert self._registry is not None
+            source_type = self._registry.source_type(identifier)
+        return self._descriptor(package, source_type)
+
+    def require_selected(self, identifiers: tuple[str, ...]) -> None:
+        for identifier in identifiers:
+            if self._lookup(identifier) is None:
+                raise SkillStoreFailure("skill_unavailable")
+
+    def install(self, request: SkillInstallRequest) -> SkillDescriptor:
+        if self._registry is None:
+            raise SkillStoreFailure("skill_source_unavailable")
+        package = self._registry.install(request, frozenset(self._packages))
+        return self._descriptor(package, request.source_type)
+
     def resolve(
         self, selected: tuple[str, ...], granted_tools: tuple[str, ...]
     ) -> tuple[tuple[SkillPackage, tuple[str, ...]], ...]:
@@ -147,7 +217,7 @@ class SkillPackageCatalog:
             raise SkillPackageError("Selected Skill IDs must be unique")
         result: list[tuple[SkillPackage, tuple[str, ...]]] = []
         for identifier in selected:
-            package = self._packages.get(identifier)
+            package = self._lookup(identifier)
             if package is None:
                 raise SkillPackageError("Selected Skill package is unavailable")
             effective = tuple(

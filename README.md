@@ -108,6 +108,26 @@ Filesystem, shell, Git, repository mutation, and network capabilities remain
 intentionally unavailable. The planned architecture and credential/network
 requirements are in [CODE_DEVELOPMENT_SCENARIO.md](docs/CODE_DEVELOPMENT_SCENARIO.md).
 
+## Upload a Skill without restarting UAR
+
+The Orchestrator now accepts a ZIP containing one UAR Skill package. The
+deployment-owned `UAR_SKILL_REGISTRY_ROOT` is persistent; set it to an absolute
+directory such as `/var/lib/universal-agent-runtime/skills`. If omitted, UAR
+uses a `skills` directory beside the resolved Qwen session directory.
+
+1. Call `GET /skills` and confirm the new ID is absent.
+2. Call `POST /skills` as `multipart/form-data` with `source_type=archive` and
+   `archive=<ZIP file>`; expect HTTP 201.
+3. Call `GET /skills` again and confirm the ID and `source_type=archive`.
+4. Create an Agent with `POST /agents` and `skills=["new-skill"]`, then start it.
+5. On a turn, the package is delivered to `/workspace/.agent/skills/new-skill/`.
+
+The same running Orchestrator handles every step; no restart or package
+reinstallation is needed. The Git form is reserved and returns HTTP 501 in
+this deployment. Archive format, limits, API fields, and the server smoke test
+are documented in [SKILL_REGISTRY.md](docs/SKILL_REGISTRY.md). For local tests,
+install `pip install -e ".[test]"`.
+
 ## AG-UI
 
 `POST /ag-ui/agents/{agent_id}/run` принимает официальный `RunAgentInput` с

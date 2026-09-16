@@ -68,6 +68,7 @@ class AGUIHttpTests(unittest.TestCase):
                 **_environment("docker"),
                 "UAR_DOCKER_NETWORK_MODE": "none",
                 "UAR_QWEN_SESSION_STORAGE_ROOT": str(root),
+                "UAR_SKILL_REGISTRY_ROOT": str(root / "skills"),
             }
         )
         runtime = DockerRuntime(

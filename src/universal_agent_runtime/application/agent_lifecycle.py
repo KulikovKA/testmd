@@ -32,6 +32,10 @@ from universal_agent_runtime.application.ports.runtime_values import (
     RuntimeObservation,
     SecretBinding,
 )
+from universal_agent_runtime.application.ports.skill_store import (
+    SkillStore,
+    SkillStoreFailure,
+)
 from universal_agent_runtime.domain.agent import AgentLifecycleState
 from universal_agent_runtime.domain.identifiers import (
     AgentId,
@@ -69,6 +73,7 @@ class AgentLifecycleErrorCode(str, Enum):
     INFERENCE_UNAVAILABLE = "inference_unavailable"
     TOOL_FAILED = "tool_failed"
     INTERACTION_FAILED = "interaction_failed"
+    SKILL_UNAVAILABLE = "skill_unavailable"
 
 
 @dataclass(frozen=True)
@@ -238,6 +243,7 @@ class AgentLifecycleService:
         runtime: AgentRuntime,
         interaction: AgentInteraction,
         repository: AgentRepository,
+        skills: SkillStore,
         configuration: LifecycleConfiguration,
         *,
         identifier_factory: Callable[[], str] = _identifier_token,
@@ -245,6 +251,7 @@ class AgentLifecycleService:
         self._runtime = runtime
         self._interaction = interaction
         self._repository = repository
+        self._skills = skills
         self._configuration = configuration
         self._identifier_factory = identifier_factory
         self._creation_lock = asyncio.Lock()
@@ -326,6 +333,15 @@ class AgentLifecycleService:
 
     async def create(self, command: CreateAgentCommand) -> CreateAgentResult:
         async with self._creation_lock:
+            try:
+                self._skills.require_selected(command.skills)
+            except SkillStoreFailure as failure:
+                if failure.code == "skill_unavailable":
+                    raise AgentLifecycleFailure(
+                        AgentLifecycleOperation.CREATE,
+                        AgentLifecycleErrorCode.SKILL_UNAVAILABLE,
+                    ) from None
+                raise
             owner = self._repository.owner_of_creation_request(command.request_id)
             if owner is not None:
                 existing = self._repository.get(owner)

@@ -9,6 +9,9 @@ from universal_agent_runtime.adapters.docker_runtime import (
     DockerRuntime,
     DockerWorkload,
 )
+from universal_agent_runtime.adapters.filesystem_skill_registry import (
+    FilesystemSkillRegistry,
+)
 from universal_agent_runtime.adapters.in_memory_agent_repository import (
     InMemoryAgentRepository,
 )
@@ -16,6 +19,7 @@ from universal_agent_runtime.adapters.qwen_session import (
     QwenSessionAdapter,
     QwenSessionConfig,
 )
+from universal_agent_runtime.adapters.skill_packages import SkillPackageCatalog
 from universal_agent_runtime.application.agent_chat import (
     AgentChatService,
     ChatConfiguration,
@@ -34,6 +38,7 @@ from universal_agent_runtime.application.ports.runtime_values import (
     ResourceLimits,
     SecretBinding,
 )
+from universal_agent_runtime.application.skill_management import SkillManagementService
 from universal_agent_runtime.configuration import ApplicationSettings, RuntimeDriver
 
 
@@ -46,6 +51,8 @@ class ApplicationComposition:
     interaction: AgentInteraction | None = None
     lifecycle: AgentLifecycleService | None = None
     chat: AgentChatService | None = None
+    skills: SkillManagementService | None = None
+    skill_catalog: SkillPackageCatalog | None = None
     package_name: str = "universal_agent_runtime"
 
     async def close(self) -> None:
@@ -81,11 +88,17 @@ def compose_application(
 
     if runtime is None:
         runtime = _compose_runtime(settings)
+    registry_root = (
+        settings.skill_registry_root or settings.qwen_storage_root.resolve().parent / "skills"
+    )
+    catalog = SkillPackageCatalog.builtins().with_registry(
+        FilesystemSkillRegistry(registry_root)
+    )
     if interaction is None:
-        interaction = _compose_interaction(settings)
+        interaction = _compose_interaction(settings, skill_catalog=catalog)
     if repository is None:
         repository = InMemoryAgentRepository()
-    lifecycle = _compose_lifecycle(settings, runtime, interaction, repository)
+    lifecycle = _compose_lifecycle(settings, runtime, interaction, repository, catalog)
     chat = AgentChatService(
         interaction,
         repository,
@@ -106,7 +119,15 @@ def compose_application(
             benchmark_timing_enabled=settings.benchmark_timing_enabled,
         ),
     )
-    return ApplicationComposition(settings, runtime, interaction, lifecycle, chat)
+    return ApplicationComposition(
+        settings,
+        runtime,
+        interaction,
+        lifecycle,
+        chat,
+        skills=SkillManagementService(catalog),
+        skill_catalog=catalog,
+    )
 
 
 def _network_destinations(
@@ -167,7 +188,11 @@ def _compose_runtime(settings: ApplicationSettings) -> AgentRuntime:
     )
 
 
-def _compose_interaction(settings: ApplicationSettings) -> AgentInteraction:
+def _compose_interaction(
+    settings: ApplicationSettings,
+    *,
+    skill_catalog: SkillPackageCatalog | None = None,
+) -> AgentInteraction:
     config = QwenSessionConfig(
         storage_root=settings.qwen_storage_root,
         base_url=settings.qwen_base_url,
@@ -197,6 +222,7 @@ def _compose_interaction(settings: ApplicationSettings) -> AgentInteraction:
             config,
             workspace=settings.docker_workspace_target,
             user=settings.docker_user,
+            skill_catalog=skill_catalog,
         ),
     )
 
@@ -206,11 +232,13 @@ def _compose_lifecycle(
     runtime: AgentRuntime,
     interaction: AgentInteraction,
     repository: AgentRepository,
+    skill_catalog: SkillPackageCatalog,
 ) -> AgentLifecycleService:
     return AgentLifecycleService(
         runtime,
         interaction,
         repository,
+        skill_catalog,
         LifecycleConfiguration(
             workload=settings.docker_workload_key,
             resources=ResourceLimits(

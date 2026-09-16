@@ -9,7 +9,8 @@
     { "key": "base_url", "value": "http://127.0.0.1:8080" },
     { "key": "agent_id", "value": "" },
     { "key": "thread_id", "value": "postman-thread-1" },
-    { "key": "run_id", "value": "postman-run-1" }
+    { "key": "run_id", "value": "postman-run-1" },
+    { "key": "skill_id", "value": "uploaded-skill" }
   ],
   "item": [
     {
@@ -19,6 +20,67 @@
     {
       "name": "Readiness",
       "request": { "method": "GET", "url": "{{base_url}}/readyz" }
+    },
+    {
+      "name": "List Skills",
+      "request": { "method": "GET", "url": "{{base_url}}/skills" }
+    },
+    {
+      "name": "Get Skill",
+      "request": { "method": "GET", "url": "{{base_url}}/skills/{{skill_id}}" }
+    },
+    {
+      "name": "Install Skill from archive",
+      "request": {
+        "method": "POST",
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            { "key": "source_type", "value": "archive", "type": "text" },
+            { "key": "archive", "type": "file", "src": [] }
+          ]
+        },
+        "url": "{{base_url}}/skills"
+      }
+    },
+    {
+      "name": "Install Skill from Git — expected unavailable",
+      "request": {
+        "method": "POST",
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            { "key": "source_type", "value": "git", "type": "text" },
+            { "key": "repository_url", "value": "https://example.com/owner/repo.git", "type": "text" },
+            { "key": "revision", "value": "main", "type": "text" },
+            { "key": "path", "value": "skills/example", "type": "text" }
+          ]
+        },
+        "url": "{{base_url}}/skills"
+      }
+    },
+    {
+      "name": "Create Agent with uploaded Skill",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "const body = pm.response.json();",
+              "pm.collectionVariables.set('agent_id', body.agent_id);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"request_id\": \"uploaded-agent-{{$guid}}\",\n  \"skills\": [\"{{skill_id}}\"],\n  \"tools\": []\n}"
+        },
+        "url": "{{base_url}}/agents"
+      }
     },
     {
       "name": "Create Agent",

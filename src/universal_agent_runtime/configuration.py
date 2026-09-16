@@ -172,6 +172,7 @@ class ApplicationSettings:
     qwen_model: str
     qwen_api_key_secret_id: str
     qwen_api_key: str = field(repr=False)
+    skill_registry_root: Path | None = None
     qwen_reasoning_directive: str = "/think"
     qwen_request_timeout_seconds: int = 600
     qwen_wall_time_seconds: int = 900
@@ -193,6 +194,13 @@ class ApplicationSettings:
     stream_send_timeout_seconds: float = 10.0
 
     def __post_init__(self) -> None:
+        if self.skill_registry_root is not None and (
+            not self.skill_registry_root.is_absolute()
+            or self.skill_registry_root == Path(self.skill_registry_root.anchor)
+        ):
+            raise ConfigurationError(
+                "UAR_SKILL_REGISTRY_ROOT must be an absolute non-root path"
+            )
         for value in (self.stream_heartbeat_seconds, self.stream_send_timeout_seconds):
             if (
                 isinstance(value, bool)
@@ -318,6 +326,16 @@ class ApplicationSettings:
             raise ConfigurationError(
                 "UAR_QWEN_SESSION_STORAGE_ROOT must not be a filesystem root"
             )
+        configured_registry = values.get("UAR_SKILL_REGISTRY_ROOT", "").strip()
+        registry_root = (
+            Path(configured_registry)
+            if configured_registry
+            else storage_root.resolve().parent / "skills"
+        )
+        if not registry_root.is_absolute() or registry_root == Path(registry_root.anchor):
+            raise ConfigurationError(
+                "UAR_SKILL_REGISTRY_ROOT must be an absolute non-root path"
+            )
         sfera_username_secret_id = values.get("UAR_SFERA_USERNAME_SECRET_ID", "").strip()
         sfera_username = values.get("UAR_SFERA_USERNAME", "")
         sfera_password_secret_id = values.get("UAR_SFERA_PASSWORD_SECRET_ID", "").strip()
@@ -359,6 +377,7 @@ class ApplicationSettings:
                 values, "UAR_AGENT_READINESS_POLL_INTERVAL_SECONDS"
             ),
             qwen_storage_root=storage_root,
+            skill_registry_root=registry_root,
             qwen_base_url=_required(values, "UAR_QWEN_BASE_URL"),
             qwen_model=_required(values, "UAR_QWEN_MODEL"),
             qwen_api_key_secret_id=_identifier(values, "UAR_QWEN_API_KEY_SECRET_ID"),

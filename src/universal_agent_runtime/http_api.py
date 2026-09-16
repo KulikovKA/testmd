@@ -2,16 +2,19 @@
 
 import json
 import re
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Path, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from starlette.datastructures import UploadFile
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.formparsers import MultiPartException, MultiPartParser
 
 from universal_agent_runtime.ag_ui import (
     AGUIEventResponse,
@@ -30,6 +33,12 @@ from universal_agent_runtime.application.agent_lifecycle import (
 )
 from universal_agent_runtime.application.ports.interaction_errors import (
     InteractionErrorCode,
+)
+from universal_agent_runtime.application.ports.skill_store import (
+    MAX_ARCHIVE_BYTES,
+    SkillDescriptor,
+    SkillInstallRequest,
+    SkillStoreFailure,
 )
 from universal_agent_runtime.composition import (
     ApplicationComposition,
@@ -109,6 +118,26 @@ class ErrorResponse(BaseModel):
     """Common transport error envelope; never includes exception details."""
 
     error: ErrorDetail
+
+
+class SkillResponse(BaseModel):
+    id: str
+    version: str
+    summary: str
+    source_type: Literal["builtin", "archive", "git"]
+    tool_capabilities: list[str]
+    mutation_tool_capabilities: list[str]
+
+    @classmethod
+    def from_descriptor(cls, descriptor: SkillDescriptor) -> "SkillResponse":
+        return cls(
+            id=descriptor.identifier,
+            version=descriptor.version,
+            summary=descriptor.summary,
+            source_type=cast(Literal["builtin", "archive", "git"], descriptor.source_type),
+            tool_capabilities=list(descriptor.tool_capabilities),
+            mutation_tool_capabilities=list(descriptor.mutation_tool_capabilities),
+        )
 
 
 class CreateAgentRequest(BaseModel):
@@ -248,6 +277,22 @@ async def _unhandled_exception_handler(_: Request, __: Exception) -> JSONRespons
     return _error(500, "internal_error", "Internal server error")
 
 
+async def _skill_exception_handler(_: Request, exception: Exception) -> JSONResponse:
+    assert isinstance(exception, SkillStoreFailure)
+    responses = {
+        "skill_archive_invalid": (422, "Skill archive is invalid"),
+        "skill_archive_too_large": (413, "Skill archive exceeds limits"),
+        "skill_already_exists": (409, "Skill already exists"),
+        "skill_source_unavailable": (501, "Git Skill source is not available in this deployment"),
+        "skill_registry_unavailable": (503, "Skill registry is unavailable"),
+        "skill_request_invalid": (422, "Skill request is invalid"),
+    }
+    status_code, message = responses.get(
+        exception.code, (500, "Skill operation failed")
+    )
+    return _error(status_code, exception.code, message)
+
+
 async def _lifecycle_exception_handler(
     _: Request, exception: Exception
 ) -> JSONResponse:
@@ -269,6 +314,7 @@ async def _lifecycle_exception_handler(
         AgentLifecycleErrorCode.INFERENCE_UNAVAILABLE: 503,
         AgentLifecycleErrorCode.TOOL_FAILED: 502,
         AgentLifecycleErrorCode.INTERACTION_FAILED: 502,
+        AgentLifecycleErrorCode.SKILL_UNAVAILABLE: 422,
     }
     messages = {
         AgentLifecycleErrorCode.NOT_FOUND: "Agent not found",
@@ -287,6 +333,7 @@ async def _lifecycle_exception_handler(
         AgentLifecycleErrorCode.INFERENCE_UNAVAILABLE: "Agent inference is unavailable",
         AgentLifecycleErrorCode.TOOL_FAILED: "Agent tool operation failed",
         AgentLifecycleErrorCode.INTERACTION_FAILED: "Agent conversation requires recovery",
+        AgentLifecycleErrorCode.SKILL_UNAVAILABLE: "Selected Skill is unavailable",
     }
     return _error(
         statuses[exception.code],
@@ -304,6 +351,41 @@ AgentPath = Annotated[
     str,
     Path(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$"),
 ]
+SkillPath = AgentPath
+
+
+def _valid_skill_source_fields(
+    source_type: str,
+    archive: UploadFile | None,
+    repository_url: str | None,
+    revision: str | None,
+    path: str | None,
+) -> bool:
+    if source_type == "archive":
+        return archive is not None and not any((repository_url, revision, path))
+    if source_type != "git" or archive is not None:
+        return False
+    if not repository_url or not revision or path is None:
+        return False
+    try:
+        parsed = urlsplit(repository_url)
+        hostname = parsed.hostname
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "https"
+        and bool(hostname)
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.query
+        and not parsed.fragment
+        and len(repository_url) <= 2048
+        and re.fullmatch(r"[A-Za-z0-9._/-]{1,128}", revision) is not None
+        and len(path) <= 256
+        and not path.startswith("/")
+        and "\\" not in path
+        and all(part not in {"", ".", ".."} for part in path.split("/"))
+    )
 
 
 def create_application(composition: ApplicationComposition) -> FastAPI:
@@ -315,6 +397,7 @@ def create_application(composition: ApplicationComposition) -> FastAPI:
         or composition.interaction is None
         or composition.lifecycle is None
         or composition.chat is None
+        or composition.skills is None
     ):
         raise ValueError(
             "application composition requires settings, both ports and lifecycle service"
@@ -322,9 +405,11 @@ def create_application(composition: ApplicationComposition) -> FastAPI:
     settings = composition.settings
     lifecycle = composition.lifecycle
     chat = composition.chat
+    skills = composition.skills
     assert settings is not None
     assert lifecycle is not None
     assert chat is not None
+    assert skills is not None
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -341,6 +426,7 @@ def create_application(composition: ApplicationComposition) -> FastAPI:
     app.add_exception_handler(StarletteHTTPException, _http_exception_handler)
     app.add_exception_handler(RequestValidationError, _validation_exception_handler)
     app.add_exception_handler(AgentLifecycleFailure, _lifecycle_exception_handler)
+    app.add_exception_handler(SkillStoreFailure, _skill_exception_handler)
     app.add_exception_handler(Exception, _unhandled_exception_handler)
 
     errors: dict[int | str, dict[str, Any]] = {
@@ -366,6 +452,101 @@ def create_application(composition: ApplicationComposition) -> FastAPI:
         503: {"model": ErrorResponse},
         504: {"model": ErrorResponse},
     }
+
+    skill_errors: dict[int | str, dict[str, Any]] = {
+        code: {"model": ErrorResponse} for code in (404, 409, 413, 422, 501, 503)
+    }
+
+    @app.get("/skills", response_model=list[SkillResponse], responses=skill_errors)
+    async def list_skills() -> list[SkillResponse]:
+        return [SkillResponse.from_descriptor(item) for item in skills.list_skills()]
+
+    @app.get("/skills/{skill_id}", response_model=SkillResponse, responses=skill_errors)
+    async def get_skill(skill_id: SkillPath) -> SkillResponse | JSONResponse:
+        descriptor = skills.get_skill(skill_id)
+        if descriptor is None:
+            return _error(404, "skill_not_found", "Skill not found")
+        return SkillResponse.from_descriptor(descriptor)
+
+    @app.post(
+        "/skills",
+        response_model=SkillResponse,
+        status_code=201,
+        responses=skill_errors,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "multipart/form-data": {
+                        "schema": {
+                            "type": "object",
+                            "required": ["source_type"],
+                            "properties": {
+                                "source_type": {"type": "string", "enum": ["archive", "git"]},
+                                "archive": {"type": "string", "format": "binary"},
+                                "repository_url": {"type": "string"},
+                                "revision": {"type": "string"},
+                                "path": {"type": "string"},
+                            },
+                        }
+                    }
+                },
+            }
+        },
+    )
+    async def install_skill(request: Request) -> SkillResponse | JSONResponse:
+        if not request.headers.get("content-type", "").lower().startswith("multipart/form-data"):
+            return _error(422, "request_invalid", "Skill request validation failed")
+        max_body = MAX_ARCHIVE_BYTES + 65_536
+        raw = bytearray()
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > max_body:
+                return _error(413, "skill_archive_too_large", "Skill archive exceeds limits")
+            raw.extend(chunk)
+
+        async def body_chunks() -> AsyncGenerator[bytes, None]:
+            yield bytes(raw)
+
+        try:
+            form = await MultiPartParser(request.headers, body_chunks()).parse()
+        except (MultiPartException, ValueError):
+            return _error(422, "request_invalid", "Skill request validation failed")
+        try:
+            if any(len(form.getlist(key)) != 1 for key in form):
+                return _error(422, "request_invalid", "Skill request validation failed")
+            if set(form.keys()) - {
+                "source_type", "archive", "repository_url", "revision", "path"
+            }:
+                return _error(422, "request_invalid", "Skill request validation failed")
+            source_type = form.get("source_type")
+            archive = form.get("archive")
+            repository_url = form.get("repository_url")
+            revision = form.get("revision")
+            path = form.get("path")
+            if archive is not None and not isinstance(archive, UploadFile):
+                return _error(422, "request_invalid", "Skill request validation failed")
+            if any(
+                value is not None and not isinstance(value, str)
+                for value in (repository_url, revision, path)
+            ):
+                return _error(422, "request_invalid", "Skill request validation failed")
+            repository_text = repository_url if isinstance(repository_url, str) else None
+            revision_text = revision if isinstance(revision, str) else None
+            path_text = path if isinstance(path, str) else None
+            if (
+                not isinstance(source_type, str)
+                or not _valid_skill_source_fields(
+                    source_type, archive, repository_text, revision_text, path_text
+                )
+            ):
+                return _error(422, "request_invalid", "Skill request validation failed")
+            payload = await archive.read(MAX_ARCHIVE_BYTES + 1) if archive else None
+            descriptor = skills.install(
+                SkillInstallRequest(source_type, payload, repository_text, revision_text, path_text)
+            )
+            return SkillResponse.from_descriptor(descriptor)
+        finally:
+            await form.close()
 
     @app.post(
         "/agents",
