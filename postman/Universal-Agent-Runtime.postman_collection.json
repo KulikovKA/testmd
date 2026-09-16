@@ -51,6 +51,18 @@
       }
     },
     {
+      "name": "Create development Skills Agent (no tools)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"request_id\": \"dev-agent-{{$guid}}\",\n  \"skills\": [\"decomposition-2\", \"code-implementation\", \"code-testing\", \"code-review\"],\n  \"tools\": []\n}"
+        },
+        "url": "{{base_url}}/agents"
+      }
+    },
+    {
       "name": "AG-UI Run (SSE)",
       "request": {
         "method": "POST",

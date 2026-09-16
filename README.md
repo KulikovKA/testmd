@@ -82,6 +82,32 @@ owner, URL, HTTP method или headers.
 `task-decomposition` остаётся независимым от Tool: с пустым списком Tools он
 составляет план, а с `get_task` может дополнительно прочитать задачу.
 
+## Development Skills
+
+Built-in Skills are discovered from every packaged direct subdirectory of
+`universal_agent_runtime.agent_assets` that contains a valid `skill.json`.
+Alongside `task-decomposition`, the deployment includes knowledge-only
+`decomposition-2`, `code-implementation`, `code-testing`, and `code-review`.
+They are selectable together, for example:
+
+```json
+{
+  "request_id": "dev-agent-unique-id",
+  "skills": [
+    "decomposition-2",
+    "code-implementation",
+    "code-testing",
+    "code-review"
+  ],
+  "tools": []
+}
+```
+
+This is a development-Skill configuration, not an autonomous coding Agent.
+Filesystem, shell, Git, repository mutation, and network capabilities remain
+intentionally unavailable. The planned architecture and credential/network
+requirements are in [CODE_DEVELOPMENT_SCENARIO.md](docs/CODE_DEVELOPMENT_SCENARIO.md).
+
 ## AG-UI
 
 `POST /ag-ui/agents/{agent_id}/run` принимает официальный `RunAgentInput` с

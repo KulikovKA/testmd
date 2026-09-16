@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "id": "code-implementation",
+  "version": "1.0.0",
+  "summary": "Turn an approved implementation plan into small, compatible, evidence-based code changes.",
+  "instruction_file": "SKILL.md",
+  "tool_capabilities": [],
+  "mutation_tool_capabilities": []
+}

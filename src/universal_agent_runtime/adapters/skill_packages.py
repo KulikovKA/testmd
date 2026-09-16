@@ -127,9 +127,18 @@ class SkillPackageCatalog:
 
     @classmethod
     def builtins(cls) -> SkillPackageCatalog:
+        """Discover every direct packaged Skill directory deterministically."""
+
         root = resources.files("universal_agent_runtime.agent_assets")
-        package_root = Path(str(root.joinpath("task-decomposition")))
-        return cls((load_skill_package(package_root),))
+        package_roots = sorted(
+            (
+                Path(str(candidate))
+                for candidate in root.iterdir()
+                if candidate.is_dir() and candidate.joinpath("skill.json").is_file()
+            ),
+            key=lambda candidate: candidate.name,
+        )
+        return cls(tuple(load_skill_package(package_root) for package_root in package_roots))
 
     def resolve(
         self, selected: tuple[str, ...], granted_tools: tuple[str, ...]
@@ -184,7 +193,6 @@ def load_skill_package(directory: Path) -> SkillPackage:
         raise SkillPackageError("Skill instruction file is invalid")
     if (
         not isinstance(tools, list)
-        or not tools
         or len(tools) > 32
         or any(not isinstance(tool, str) for tool in tools)
         or len(tools) != len(set(tools))
@@ -200,6 +208,7 @@ def load_skill_package(directory: Path) -> SkillPackage:
         or any(not isinstance(tool, str) for tool in mutation_tools)
         or len(mutation_tools) != len(set(mutation_tools))
         or any(tool not in tools for tool in mutation_tools)
+        or (not tools and mutation_tools)
     ):
         raise SkillPackageError("Skill mutation capabilities are invalid")
     instructions_path = directory / instruction_file
