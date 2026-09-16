@@ -37,6 +37,7 @@
           "mode": "formdata",
           "formdata": [
             { "key": "source_type", "value": "archive", "type": "text" },
+            { "key": "skill_id", "value": "{{skill_id}}", "type": "text" },
             { "key": "archive", "type": "file", "src": [] }
           ]
         },
@@ -51,6 +52,7 @@
           "mode": "formdata",
           "formdata": [
             { "key": "source_type", "value": "git", "type": "text" },
+            { "key": "skill_id", "value": "architecture-review", "type": "text" },
             { "key": "repository_url", "value": "https://example.com/owner/repo.git", "type": "text" },
             { "key": "revision", "value": "main", "type": "text" },
             { "key": "path", "value": "skills/example", "type": "text" }

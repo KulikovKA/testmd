@@ -50,12 +50,21 @@ class FilesystemSkillRegistry:
             if directory.is_symlink():
                 raise ValueError
             paths = tuple(directory.rglob("*"))
+            payload_files = tuple(
+                path
+                for path in paths
+                if path.is_file()
+                and (
+                    path.parent != directory
+                    or path.name.casefold() not in {"skill.json", _ORIGIN_FILE}
+                )
+            )
             if (
-                len(paths) > MAX_ARCHIVE_ENTRIES + 1
+                len(payload_files) > MAX_ARCHIVE_ENTRIES
                 or sum(
                     path.stat().st_size
-                    for path in paths
-                    if path.is_file() and not path.is_symlink()
+                    for path in payload_files
+                    if not path.is_symlink()
                 )
                 > MAX_UNCOMPRESSED_BYTES
             ):
@@ -118,26 +127,52 @@ class FilesystemSkillRegistry:
         if source is None:
             raise SkillStoreFailure("skill_request_invalid")
         try:
+            validate_identifier(request.skill_id)
+        except ValueError:
+            raise SkillStoreFailure("skill_request_invalid") from None
+        identifier = request.skill_id
+        destination = self.root / identifier
+        if identifier in builtin_ids or destination.exists():
+            raise SkillStoreFailure("skill_already_exists")
+        if destination.is_symlink():
+            raise SkillStoreFailure("skill_registry_unavailable")
+        try:
             with tempfile.TemporaryDirectory(
                 prefix=".skill-stage-", dir=self.root
             ) as staging_name:
                 staging = Path(staging_name)
-                directory = source.materialize(request, staging)
+                directory = source.materialize(request, staging / "source")
+                if (
+                    not (directory / "SKILL.md").is_file()
+                    or (directory / "SKILL.md").is_symlink()
+                ):
+                    raise SkillStoreFailure("skill_archive_invalid")
+                normalized = staging / "normalized" / identifier
+                normalized.parent.mkdir()
+                os.rename(directory, normalized)
+                (normalized / "skill.json").write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "id": identifier,
+                            "version": "1.0.0",
+                            "summary": f"Uploaded Skill {identifier}.",
+                            "instruction_file": "SKILL.md",
+                            "tool_capabilities": [],
+                            "mutation_tool_capabilities": [],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
                 try:
-                    package = load_skill_package(directory)
+                    package = load_skill_package(normalized)
                 except SkillPackageError:
                     raise SkillStoreFailure("skill_archive_invalid") from None
-                if package.identifier != directory.name:
-                    raise SkillStoreFailure("skill_archive_invalid")
-                identifier = package.identifier
-                if identifier in builtin_ids or (self.root / identifier).exists():
-                    raise SkillStoreFailure("skill_already_exists")
-                (directory / _ORIGIN_FILE).write_text(
+                (normalized / _ORIGIN_FILE).write_text(
                     json.dumps(request.source_type), encoding="utf-8"
                 )
-                destination = self.root / identifier
                 try:
-                    os.rename(directory, destination)
+                    os.rename(normalized, destination)
                 except OSError:
                     if destination.exists():
                         raise SkillStoreFailure("skill_already_exists") from None

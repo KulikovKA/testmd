@@ -32,7 +32,7 @@ class GitSkillSource:
 
 
 class ArchiveSkillSource:
-    """Extract exactly one safe UAR package without using ZipFile.extractall."""
+    """Extract exactly one external Skill without using ZipFile.extractall."""
 
     def materialize(self, request: SkillInstallRequest, staging: Path) -> Path:
         data = request.archive
@@ -103,7 +103,10 @@ class ArchiveSkillSource:
             ):
                 raise SkillStoreFailure("skill_archive_invalid")
             is_dir = entry.is_dir()
-            if (len(parts) < 2 and not is_dir) or parts[-1] == ".uar-source.json":
+            if (len(parts) < 2 and not is_dir) or parts[-1].casefold() in {
+                "skill.json",
+                ".uar-source.json",
+            }:
                 raise SkillStoreFailure("skill_archive_invalid")
             roots.add(parts[0])
             key = "/".join(parts).casefold()

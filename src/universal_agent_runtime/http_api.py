@@ -480,9 +480,10 @@ def create_application(composition: ApplicationComposition) -> FastAPI:
                     "multipart/form-data": {
                         "schema": {
                             "type": "object",
-                            "required": ["source_type"],
+                            "required": ["source_type", "skill_id"],
                             "properties": {
                                 "source_type": {"type": "string", "enum": ["archive", "git"]},
+                                "skill_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"},
                                 "archive": {"type": "string", "format": "binary"},
                                 "repository_url": {"type": "string"},
                                 "revision": {"type": "string"},
@@ -515,10 +516,11 @@ def create_application(composition: ApplicationComposition) -> FastAPI:
             if any(len(form.getlist(key)) != 1 for key in form):
                 return _error(422, "request_invalid", "Skill request validation failed")
             if set(form.keys()) - {
-                "source_type", "archive", "repository_url", "revision", "path"
+                "source_type", "skill_id", "archive", "repository_url", "revision", "path"
             }:
                 return _error(422, "request_invalid", "Skill request validation failed")
             source_type = form.get("source_type")
+            skill_id = form.get("skill_id")
             archive = form.get("archive")
             repository_url = form.get("repository_url")
             revision = form.get("revision")
@@ -535,6 +537,8 @@ def create_application(composition: ApplicationComposition) -> FastAPI:
             path_text = path if isinstance(path, str) else None
             if (
                 not isinstance(source_type, str)
+                or not isinstance(skill_id, str)
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", skill_id) is None
                 or not _valid_skill_source_fields(
                     source_type, archive, repository_text, revision_text, path_text
                 )
@@ -542,7 +546,14 @@ def create_application(composition: ApplicationComposition) -> FastAPI:
                 return _error(422, "request_invalid", "Skill request validation failed")
             payload = await archive.read(MAX_ARCHIVE_BYTES + 1) if archive else None
             descriptor = skills.install(
-                SkillInstallRequest(source_type, payload, repository_text, revision_text, path_text)
+                SkillInstallRequest(
+                    source_type=source_type,
+                    archive=payload,
+                    skill_id=skill_id,
+                    repository_url=repository_text,
+                    revision=revision_text,
+                    path=path_text,
+                )
             )
             return SkillResponse.from_descriptor(descriptor)
         finally:

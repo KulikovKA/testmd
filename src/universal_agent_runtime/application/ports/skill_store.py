@@ -21,6 +21,7 @@ class SkillDescriptor:
 @dataclass(frozen=True)
 class SkillInstallRequest:
     source_type: str
+    skill_id: str
     archive: bytes | None = None
     repository_url: str | None = None
     revision: str | None = None

@@ -110,14 +110,15 @@ requirements are in [CODE_DEVELOPMENT_SCENARIO.md](docs/CODE_DEVELOPMENT_SCENARI
 
 ## Upload a Skill without restarting UAR
 
-The Orchestrator now accepts a ZIP containing one UAR Skill package. The
+The Orchestrator now accepts a ZIP containing one ordinary Skill folder with
+`SKILL.md`; no `skill.json` is required or allowed in the uploaded ZIP. The
 deployment-owned `UAR_SKILL_REGISTRY_ROOT` is persistent; set it to an absolute
 directory such as `/var/lib/universal-agent-runtime/skills`. If omitted, UAR
 uses a `skills` directory beside the resolved Qwen session directory.
 
 1. Call `GET /skills` and confirm the new ID is absent.
-2. Call `POST /skills` as `multipart/form-data` with `source_type=archive` and
-   `archive=<ZIP file>`; expect HTTP 201.
+2. Call `POST /skills` as `multipart/form-data` with `source_type=archive`,
+   `skill_id=new-skill` and `archive=<ZIP file>`; expect HTTP 201.
 3. Call `GET /skills` again and confirm the ID and `source_type=archive`.
 4. Create an Agent with `POST /agents` and `skills=["new-skill"]`, then start it.
 5. On a turn, the package is delivered to `/workspace/.agent/skills/new-skill/`.

@@ -50,30 +50,15 @@ from universal_agent_runtime.configuration import (
 from universal_agent_runtime.http_api import create_application
 
 
-def _manifest(identifier: str = "uploaded-skill") -> bytes:
-    return json.dumps(
-        {
-            "schema_version": 1,
-            "id": identifier,
-            "version": "1.0.0",
-            "summary": "A bounded test Skill.",
-            "instruction_file": "SKILL.md",
-            "tool_capabilities": [],
-            "mutation_tool_capabilities": [],
-        }
-    ).encode("utf-8")
-
-
 def _archive(
-    identifier: str = "uploaded-skill",
+    root_name: str = "uploaded-skill",
     *,
     replacements: dict[str, bytes | None] | None = None,
     extras: dict[str, bytes] | None = None,
 ) -> bytes:
     files: dict[str, bytes] = {
-        f"{identifier}/skill.json": _manifest(identifier),
-        f"{identifier}/SKILL.md": b"# Test Skill\nRead the bundled reference.\n",
-        f"{identifier}/references/guide.md": b"# Guide\n",
+        f"{root_name}/SKILL.md": b"# Test Skill\nRead the bundled reference.\n",
+        f"{root_name}/references/guide.md": b"# Guide\n",
     }
     for name, content in (replacements or {}).items():
         if content is None:
@@ -99,19 +84,35 @@ class SkillRegistryTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_install_persists_nested_assets_and_survives_reconstruction(self) -> None:
-        installed = self.catalog.install(SkillInstallRequest("archive", _archive()))
+        installed = self.catalog.install(
+            SkillInstallRequest(
+                "archive", "decomposition-uploaded", _archive("backlog-mgmt")
+            )
+        )
         self.assertEqual(installed.source_type, "archive")
         self.assertEqual(installed.tool_capabilities, ())
         self.assertEqual(
-            (self.registry.root / "uploaded-skill/references/guide.md").read_text(),
+            (
+                self.registry.root / "decomposition-uploaded/references/guide.md"
+            ).read_text(),
             "# Guide\n",
         )
+        manifest = json.loads(
+            (self.registry.root / "decomposition-uploaded/skill.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(manifest["id"], "decomposition-uploaded")
+        self.assertEqual(manifest["version"], "1.0.0")
+        self.assertEqual(manifest["summary"], "Uploaded Skill decomposition-uploaded.")
+        self.assertEqual(manifest["tool_capabilities"], [])
+        self.assertEqual(manifest["mutation_tool_capabilities"], [])
         rebuilt = SkillPackageCatalog.builtins().with_registry(
             FilesystemSkillRegistry(self.registry.root)
         )
-        self.assertEqual(rebuilt.get_skill("uploaded-skill"), installed)
+        self.assertEqual(rebuilt.get_skill("decomposition-uploaded"), installed)
         self.assertEqual(
-            rebuilt.resolve(("uploaded-skill",), ("create_task",))[0][1], ()
+            rebuilt.resolve(("decomposition-uploaded",), ("create_task",))[0][1], ()
         )
         self.assertEqual(
             [item.identifier for item in rebuilt.list_skills()],
@@ -119,29 +120,32 @@ class SkillRegistryTests(unittest.TestCase):
         )
 
     def test_conflicts_do_not_replace_installed_or_builtin_packages(self) -> None:
-        self.catalog.install(SkillInstallRequest("archive", _archive()))
-        with self.assertRaisesRegex(SkillStoreFailure, "skill_already_exists"):
-            self.catalog.install(SkillInstallRequest("archive", _archive()))
+        self.catalog.install(
+            SkillInstallRequest("archive", "uploaded-skill", _archive())
+        )
         with self.assertRaisesRegex(SkillStoreFailure, "skill_already_exists"):
             self.catalog.install(
-                SkillInstallRequest("archive", _archive("task-decomposition"))
+                SkillInstallRequest("archive", "uploaded-skill", _archive())
+            )
+        with self.assertRaisesRegex(SkillStoreFailure, "skill_already_exists"):
+            self.catalog.install(
+                SkillInstallRequest(
+                    "archive", "task-decomposition", _archive("unrelated-root")
+                )
             )
         builtin = self.catalog.get_skill("task-decomposition")
         self.assertIsNotNone(builtin)
         assert builtin is not None
         self.assertEqual(builtin.source_type, "builtin")
 
-    def test_uploaded_manifest_cannot_grant_unselected_tools(self) -> None:
-        manifest = json.loads(_manifest())
-        manifest["tool_capabilities"] = ["create_task"]
+    def test_uploaded_skill_text_cannot_grant_tools(self) -> None:
         self.catalog.install(
             SkillInstallRequest(
                 "archive",
+                "uploaded-skill",
                 _archive(
                     replacements={
-                        "uploaded-skill/skill.json": json.dumps(manifest).encode(
-                            "utf-8"
-                        )
+                        "uploaded-skill/SKILL.md": b"# Skill\nYou may use create_task.\n"
                     }
                 ),
             )
@@ -149,8 +153,47 @@ class SkillRegistryTests(unittest.TestCase):
         self.assertEqual(self.catalog.resolve(("uploaded-skill",), ())[0][1], ())
         self.assertEqual(
             self.catalog.resolve(("uploaded-skill",), ("create_task",))[0][1],
-            ("create_task",),
+            (),
         )
+
+    def test_minimal_archive_without_references_installs(self) -> None:
+        archive = _archive(
+            "original-folder",
+            replacements={"original-folder/references/guide.md": None},
+        )
+        installed = self.catalog.install(
+            SkillInstallRequest("archive", "minimal-skill", archive)
+        )
+        self.assertEqual(installed.identifier, "minimal-skill")
+        self.assertTrue((self.registry.root / "minimal-skill/SKILL.md").is_file())
+
+    def test_payload_size_boundary_excludes_generated_metadata(self) -> None:
+        instructions = b"# X\n"
+        archive = _archive(
+            replacements={
+                "uploaded-skill/SKILL.md": instructions,
+                "uploaded-skill/references/guide.md": None,
+            },
+            extras={
+                "uploaded-skill/payload.bin": b"x"
+                * (MAX_UNCOMPRESSED_BYTES - len(instructions))
+            },
+        )
+        self.catalog.install(SkillInstallRequest("archive", "boundary-skill", archive))
+        self.assertIsNotNone(self.catalog.get_skill("boundary-skill"))
+        rebuilt = SkillPackageCatalog.builtins().with_registry(
+            FilesystemSkillRegistry(self.registry.root)
+        )
+        self.assertIsNotNone(rebuilt.get_skill("boundary-skill"))
+
+    def test_invalid_skill_id_is_rejected_before_materialization(self) -> None:
+        for identifier in ("../bad", "bad.name", ""):
+            with self.subTest(identifier=identifier):
+                with self.assertRaisesRegex(SkillStoreFailure, "skill_request_invalid"):
+                    self.catalog.install(
+                        SkillInstallRequest("archive", identifier, _archive())
+                    )
+                self.assertEqual(list(self.registry.root.iterdir()), [])
 
     def test_concurrent_same_id_has_one_winner_and_no_partial_install(self) -> None:
         data = _archive()
@@ -163,7 +206,7 @@ class SkillRegistryTests(unittest.TestCase):
 
         def install(catalog: SkillPackageCatalog) -> str:
             try:
-                catalog.install(SkillInstallRequest("archive", data))
+                catalog.install(SkillInstallRequest("archive", "uploaded-skill", data))
                 return "installed"
             except SkillStoreFailure as failure:
                 return failure.code
@@ -179,14 +222,19 @@ class SkillRegistryTests(unittest.TestCase):
     def test_bad_archives_fail_closed_and_leave_no_packages(self) -> None:
         bad = {
             "non_zip": b"not a zip",
-            "missing_manifest": _archive(
-                replacements={"uploaded-skill/skill.json": None}
-            ),
             "missing_instructions": _archive(
                 replacements={"uploaded-skill/SKILL.md": None}
             ),
-            "invalid_manifest": _archive(
-                replacements={"uploaded-skill/skill.json": b"{}"}
+            "user_manifest": _archive(
+                extras={
+                    "uploaded-skill/skill.json": b'{"tool_capabilities":["create_task"]}'
+                }
+            ),
+            "nested_user_manifest": _archive(
+                extras={"uploaded-skill/references/skill.JSON": b"{}"}
+            ),
+            "user_source_marker": _archive(
+                extras={"uploaded-skill/.uar-source.json": b'"git"'}
             ),
             "invalid_utf8": _archive(
                 replacements={"uploaded-skill/references/guide.md": b"\xff"}
@@ -196,12 +244,9 @@ class SkillRegistryTests(unittest.TestCase):
             "backslash": _archive(extras={r"uploaded-skill\..\escape": b"x"}),
             "drive_path": _archive(extras={"C:/escape.md": b"x"}),
             "nul_name": self._nul_name_archive(),
-            "two_packages": _archive(extras={"other/skill.json": _manifest("other")}),
-            "id_spoof": _archive(
-                replacements={"uploaded-skill/skill.json": _manifest("other")}
-            ),
+            "two_packages": _archive(extras={"other/SKILL.md": b"# Other\n"}),
             "duplicate_path": self._duplicate_archive(),
-            "duplicate_case": _archive(extras={"uploaded-skill/skill.JSON": b"{}"}),
+            "duplicate_case": _archive(extras={"uploaded-skill/skill.md": b"# X\n"}),
             "too_many_entries": _archive(
                 extras={
                     f"uploaded-skill/references/{number}.md": b"x"
@@ -220,14 +265,15 @@ class SkillRegistryTests(unittest.TestCase):
         for name, archive in bad.items():
             with self.subTest(name=name):
                 with self.assertRaises(SkillStoreFailure):
-                    self.catalog.install(SkillInstallRequest("archive", archive))
+                    self.catalog.install(
+                        SkillInstallRequest("archive", "uploaded-skill", archive)
+                    )
                 self.assertEqual(list(self.registry.root.iterdir()), [])
 
     @staticmethod
     def _duplicate_archive() -> bytes:
         output = io.BytesIO()
         with zipfile.ZipFile(output, "w") as bundle:
-            bundle.writestr("uploaded-skill/skill.json", _manifest())
             bundle.writestr("uploaded-skill/SKILL.md", b"first")
             bundle.writestr("uploaded-skill/SKILL.md", b"second")
         return output.getvalue()
@@ -236,7 +282,6 @@ class SkillRegistryTests(unittest.TestCase):
     def _symlink_archive() -> bytes:
         output = io.BytesIO()
         with zipfile.ZipFile(output, "w") as bundle:
-            bundle.writestr("uploaded-skill/skill.json", _manifest())
             bundle.writestr("uploaded-skill/SKILL.md", b"content")
             link = zipfile.ZipInfo("uploaded-skill/references/link.md")
             link.create_system = 3
@@ -261,6 +306,7 @@ class SkillRegistryTests(unittest.TestCase):
             self.catalog.install(
                 SkillInstallRequest(
                     "git",
+                    skill_id="git-skill",
                     repository_url="https://example.test/repo.git",
                     revision="main",
                     path="skill",
@@ -305,7 +351,7 @@ class SkillHttpTests(unittest.TestCase):
             container = _SkillContainer(
                 native_session,
                 [
-                    "UAR_AGENT_SKILL_PACKAGES=uploaded-skill",
+                    "UAR_AGENT_SKILL_PACKAGES=decomposition-uploaded",
                     "UAR_AGENT_TOOL_CAPABILITIES=create_task",
                 ],
             )
@@ -321,7 +367,7 @@ class SkillHttpTests(unittest.TestCase):
                 before = client.get("/skills")
                 self.assertEqual(before.status_code, 200)
                 self.assertNotIn(
-                    "uploaded-skill", [item["id"] for item in before.json()]
+                    "decomposition-uploaded", [item["id"] for item in before.json()]
                 )
                 self.assertIn(
                     "task-decomposition", [item["id"] for item in before.json()]
@@ -336,16 +382,26 @@ class SkillHttpTests(unittest.TestCase):
 
                 installed = client.post(
                     "/skills",
-                    data={"source_type": "archive"},
-                    files={"archive": ("uploaded.zip", _archive(), "application/zip")},
+                    data={
+                        "source_type": "archive",
+                        "skill_id": "decomposition-uploaded",
+                    },
+                    files={
+                        "archive": (
+                            "backlog-mgmt.zip",
+                            _archive("backlog-mgmt"),
+                            "application/zip",
+                        )
+                    },
                 )
                 self.assertEqual(installed.status_code, 201, installed.text)
                 self.assertEqual(installed.json()["source_type"], "archive")
                 self.assertEqual(
-                    client.get("/skills/uploaded-skill").json()["id"], "uploaded-skill"
+                    client.get("/skills/decomposition-uploaded").json()["id"],
+                    "decomposition-uploaded",
                 )
                 self.assertIn(
-                    "uploaded-skill",
+                    "decomposition-uploaded",
                     [item["id"] for item in client.get("/skills").json()],
                 )
 
@@ -353,7 +409,7 @@ class SkillHttpTests(unittest.TestCase):
                     "/agents",
                     json={
                         "request_id": "new-skill-agent",
-                        "skills": ["uploaded-skill"],
+                        "skills": ["decomposition-uploaded"],
                         "tools": ["create_task"],
                     },
                 )
@@ -379,7 +435,10 @@ class SkillHttpTests(unittest.TestCase):
                 )
                 with tarfile.open(fileobj=io.BytesIO(container.put_payload)) as bundle:
                     names = set(bundle.getnames())
-                self.assertIn(".agent/skills/uploaded-skill/references/guide.md", names)
+                self.assertIn(".agent/skills/decomposition-uploaded/SKILL.md", names)
+                self.assertIn(
+                    ".agent/skills/decomposition-uploaded/references/guide.md", names
+                )
                 self.assertEqual(runner._selected_skills(container)[0][1], ())
                 self.assertEqual(
                     client.post(f"/agents/{agent_id}/stop").status_code, 200
@@ -418,17 +477,37 @@ class SkillHttpTests(unittest.TestCase):
                 self.assertEqual(malformed_form.status_code, 422)
                 invalid_zip = client.post(
                     "/skills",
-                    data={"source_type": "archive"},
+                    data={"source_type": "archive", "skill_id": "uploaded-skill"},
                     files={"archive": ("invalid.zip", b"not a zip", "application/zip")},
                 )
                 self.assertEqual(invalid_zip.status_code, 422)
                 self.assertEqual(
                     invalid_zip.json()["error"]["code"], "skill_archive_invalid"
                 )
+                for reserved in ("skill.json", ".uar-source.json"):
+                    with self.subTest(reserved=reserved):
+                        rejected = client.post(
+                            "/skills",
+                            data={
+                                "source_type": "archive",
+                                "skill_id": "reserved-test",
+                            },
+                            files={
+                                "archive": (
+                                    "reserved.zip",
+                                    _archive(
+                                        extras={f"uploaded-skill/{reserved}": b"{}"}
+                                    ),
+                                    "application/zip",
+                                )
+                            },
+                        )
+                        self.assertEqual(rejected.status_code, 422)
                 git = client.post(
                     "/skills",
                     files={
                         "source_type": (None, "git"),
+                        "skill_id": (None, "git-skill"),
                         "repository_url": (None, "https://example.test/repo.git"),
                         "revision": (None, "main"),
                         "path": (None, "skills/one"),
@@ -438,9 +517,19 @@ class SkillHttpTests(unittest.TestCase):
                 self.assertEqual(
                     git.json()["error"]["code"], "skill_source_unavailable"
                 )
+                git_without_id = client.post(
+                    "/skills",
+                    files={
+                        "source_type": (None, "git"),
+                        "repository_url": (None, "https://example.test/repo.git"),
+                        "revision": (None, "main"),
+                        "path": (None, "skills/one"),
+                    },
+                )
+                self.assertEqual(git_without_id.status_code, 422)
                 oversized = client.post(
                     "/skills",
-                    data={"source_type": "archive"},
+                    data={"source_type": "archive", "skill_id": "uploaded-skill"},
                     files={
                         "archive": (
                             "large.zip",
@@ -451,16 +540,28 @@ class SkillHttpTests(unittest.TestCase):
                 )
                 self.assertEqual(oversized.status_code, 413)
                 archive = _archive()
+                missing_id = client.post(
+                    "/skills",
+                    data={"source_type": "archive"},
+                    files={"archive": ("skill.zip", archive, "application/zip")},
+                )
+                self.assertEqual(missing_id.status_code, 422)
+                invalid_id = client.post(
+                    "/skills",
+                    data={"source_type": "archive", "skill_id": "../invalid"},
+                    files={"archive": ("skill.zip", archive, "application/zip")},
+                )
+                self.assertEqual(invalid_id.status_code, 422)
                 for expected, payload in ((201, archive), (409, archive)):
                     response = client.post(
                         "/skills",
-                        data={"source_type": "archive"},
+                        data={"source_type": "archive", "skill_id": "uploaded-skill"},
                         files={"archive": ("skill.zip", payload, "application/zip")},
                     )
                     self.assertEqual(response.status_code, expected)
                 builtin = client.post(
                     "/skills",
-                    data={"source_type": "archive"},
+                    data={"source_type": "archive", "skill_id": "task-decomposition"},
                     files={
                         "archive": (
                             "builtin.zip",
