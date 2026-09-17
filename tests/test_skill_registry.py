@@ -261,6 +261,9 @@ class SkillRegistryTests(unittest.TestCase):
             ),
             "too_much_compressed": b"x" * (MAX_ARCHIVE_BYTES + 1),
             "symlink": self._symlink_archive(),
+            "special_file": self._special_file_archive(),
+            "whitespace_component": _archive("uploaded skill"),
+            "unicode_component": _archive("загруженный-навык"),
         }
         for name, archive in bad.items():
             with self.subTest(name=name):
@@ -287,6 +290,17 @@ class SkillRegistryTests(unittest.TestCase):
             link.create_system = 3
             link.external_attr = (stat.S_IFLNK | 0o777) << 16
             bundle.writestr(link, "../../escape")
+        return output.getvalue()
+
+    @staticmethod
+    def _special_file_archive() -> bytes:
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w") as bundle:
+            bundle.writestr("uploaded-skill/SKILL.md", b"content")
+            special = zipfile.ZipInfo("uploaded-skill/references/fifo")
+            special.create_system = 3
+            special.external_attr = (stat.S_IFIFO | 0o644) << 16
+            bundle.writestr(special, b"")
         return output.getvalue()
 
     @staticmethod
@@ -475,6 +489,48 @@ class SkillHttpTests(unittest.TestCase):
                     headers={"Content-Type": "multipart/form-data"},
                 )
                 self.assertEqual(malformed_form.status_code, 422)
+                for name, fields in (
+                    (
+                        "duplicate_field",
+                        [
+                            ("source_type", (None, "archive")),
+                            ("source_type", (None, "archive")),
+                            ("skill_id", (None, "ambiguous-skill")),
+                            ("archive", ("skill.zip", _archive(), "application/zip")),
+                        ],
+                    ),
+                    (
+                        "unknown_field",
+                        [
+                            ("source_type", (None, "archive")),
+                            ("skill_id", (None, "unknown-field-skill")),
+                            ("unexpected", (None, "value")),
+                            ("archive", ("skill.zip", _archive(), "application/zip")),
+                        ],
+                    ),
+                    (
+                        "missing_archive",
+                        [
+                            ("source_type", (None, "archive")),
+                            ("skill_id", (None, "missing-archive-skill")),
+                        ],
+                    ),
+                    (
+                        "archive_and_git_fields",
+                        [
+                            ("source_type", (None, "archive")),
+                            ("skill_id", (None, "mixed-source-skill")),
+                            ("repository_url", (None, "https://example.test/repo.git")),
+                            ("archive", ("skill.zip", _archive(), "application/zip")),
+                        ],
+                    ),
+                ):
+                    with self.subTest(name=name):
+                        rejected = client.post("/skills", files=fields)
+                        self.assertEqual(rejected.status_code, 422)
+                        self.assertEqual(
+                            rejected.json()["error"]["code"], "request_invalid"
+                        )
                 invalid_zip = client.post(
                     "/skills",
                     data={"source_type": "archive", "skill_id": "uploaded-skill"},

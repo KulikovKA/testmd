@@ -67,6 +67,14 @@ and at most 256 entries. The entire multipart request is capped at 8 MiB plus
 traversal, backslashes, NUL names, duplicate or conflicting paths, links,
 special files, multiple package roots, reserved UAR metadata, invalid UTF-8 in
 Markdown/JSON, and missing or invalid `SKILL.md`. It does not call `extractall`.
+Every component of an **internal ZIP member path** (including the single
+top-level folder) is deliberately limited to ASCII
+`[A-Za-z0-9][A-Za-z0-9._-]{0,127}`. Spaces and Unicode member names are rejected;
+the uploaded ZIP file's own multipart filename is not used as a package path.
+This PoC restriction gives UAR one unambiguous, case-insensitive path namespace
+without relying on ZIP filename-encoding flags or platform-specific Unicode
+normalization. Prepare archive contents with ASCII component names when
+uploading a Skill.
 Generated internal metadata is excluded from the user payload size and entry
 limits on subsequent registry reads. Any failed installation removes staging
 and leaves the final Skill directory absent. At runtime the same Skill is
