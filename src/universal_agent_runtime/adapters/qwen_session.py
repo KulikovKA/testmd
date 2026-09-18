@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path, PurePosixPath
@@ -25,6 +26,7 @@ from universal_agent_runtime.application.ports.interaction_errors import (
     InteractionOperation as Op,
 )
 from universal_agent_runtime.application.ports.interaction_values import (
+    AssistantTextDelta,
     DeleteSessionResult,
     SessionDebugSnapshot,
     SessionObservation,
@@ -82,7 +84,11 @@ _DEBUG_METRIC_KEYS = {
     "ttft_ms": ("ttft_ms",),
     "input_tokens": ("input_tokens", "input_token_count", "promptTokenCount"),
     "output_tokens": ("output_tokens", "output_token_count", "candidatesTokenCount"),
-    "thoughts_tokens": ("thoughts_tokens", "thoughts_token_count", "thoughtsTokenCount"),
+    "thoughts_tokens": (
+        "thoughts_tokens",
+        "thoughts_token_count",
+        "thoughtsTokenCount",
+    ),
     "total_tokens": ("total_tokens", "total_token_count", "totalTokenCount"),
 }
 
@@ -95,10 +101,15 @@ def _debug_transcript_summary(
     events = [json.loads(line) for line in lines]
     if not all(isinstance(event, dict) for event in events):
         raise ValueError("invalid transcript event")
+
     def parts(event: dict[str, Any]) -> list[dict[str, Any]]:
         message = event.get("message")
         values = message.get("parts") if isinstance(message, dict) else None
-        return [part for part in values if isinstance(part, dict)] if isinstance(values, list) else []
+        return (
+            [part for part in values if isinstance(part, dict)]
+            if isinstance(values, list)
+            else []
+        )
 
     last_user = max(
         (
@@ -117,7 +128,11 @@ def _debug_transcript_summary(
         kind = event.get("type")
         event_parts = parts(event)
         function_response = any("functionResponse" in part for part in event_parts)
-        if isinstance(kind, str) and kind in counts and not (kind == "user" and function_response):
+        if (
+            isinstance(kind, str)
+            and kind in counts
+            and not (kind == "user" and function_response)
+        ):
             counts[kind] += 1
         if kind == "tool_call":
             name = event.get("tool_name", event.get("name"))
@@ -137,7 +152,9 @@ def _debug_transcript_summary(
         if not isinstance(kind, str) or kind not in {*_DEBUG_EVENT_TYPES, "result"}:
             continue
         system_payload = event.get("systemPayload")
-        ui_event = system_payload.get("uiEvent") if isinstance(system_payload, dict) else None
+        ui_event = (
+            system_payload.get("uiEvent") if isinstance(system_payload, dict) else None
+        )
         # Qwen JSONL uses uiEvent and usageMetadata; older outputs can use
         # flat fields, usage or stats.
         for source in (
@@ -274,9 +291,7 @@ class QwenSessionConfig:
     def sfera_ca_cert_container_path(self) -> str:
         """Stable Agent-workspace path inherited by the Node MCP process."""
 
-        return str(
-            PurePosixPath(self.task_mcp_server_path).with_name("sfera-ca.pem")
-        )
+        return str(PurePosixPath(self.task_mcp_server_path).with_name("sfera-ca.pem"))
 
 
 @dataclass(frozen=True)
@@ -347,6 +362,7 @@ class DockerQwenCommandRunner:
             system_prompt,
             "--output-format",
             "stream-json",
+            "--include-partial-messages",
             "--max-session-turns",
             str(self._config.max_session_turns),
             "--max-tool-calls",
@@ -386,7 +402,9 @@ class DockerQwenCommandRunner:
     def run(self, invocation: QwenInvocation) -> QwenExecution:
         command = self.command(invocation)
         container = None
-        started_ns = time.perf_counter_ns() if self._config.benchmark_timing_enabled else 0
+        started_ns = (
+            time.perf_counter_ns() if self._config.benchmark_timing_enabled else 0
+        )
         execution_started_ns = 0
         metric_output: str | None = None
         try:
@@ -550,6 +568,10 @@ def _parse_qwen_output(output: str, expected: UUID) -> QwenExecution:
     )
     if final is None:
         raise QwenRunnerFailure(QwenRunnerErrorCode.PROTOCOL_FAILURE)
+    return _parse_qwen_result(final, expected)
+
+
+def _parse_qwen_result(final: dict[str, Any], expected: UUID) -> QwenExecution:
     try:
         actual = UUID(str(final["session_id"]))
         response = str(final["result"])
@@ -560,6 +582,150 @@ def _parse_qwen_output(output: str, expected: UUID) -> QwenExecution:
     if response.lstrip().startswith("[API Error:"):
         raise QwenRunnerFailure(QwenRunnerErrorCode.INFERENCE_UNAVAILABLE)
     return QwenExecution(actual, response)
+
+
+class QwenJSONLStream:
+    """Bounded JSONL decoder that forwards only assistant text deltas."""
+
+    def __init__(self, expected: UUID, on_delta: Callable[[str], None] | None) -> None:
+        self.expected = expected
+        self.on_delta = on_delta
+        self.buffer = bytearray()
+        self.final: dict[str, Any] | None = None
+        self.text = ""
+        self.event_types: dict[str, int] = {}
+        self.mcp_metrics: list[dict[str, Any]] = []
+        self._assistant = False
+        self._text_blocks: set[int] = set()
+
+    def feed(self, chunk: bytes) -> None:
+        if not isinstance(chunk, bytes):
+            raise QwenRunnerFailure(QwenRunnerErrorCode.PROTOCOL_FAILURE)
+        for fragment in chunk.split(b"\n")[:-1]:
+            self.buffer.extend(fragment)
+            self._line(bytes(self.buffer))
+            self.buffer.clear()
+        tail = chunk.rsplit(b"\n", 1)[-1]
+        self.buffer.extend(tail)
+        if len(self.buffer) > 262_144:
+            raise QwenRunnerFailure(QwenRunnerErrorCode.PROTOCOL_FAILURE)
+
+    def _line(self, raw: bytes) -> None:
+        if len(raw) > 262_144:
+            raise QwenRunnerFailure(QwenRunnerErrorCode.PROTOCOL_FAILURE)
+        if raw.startswith(b"UAR_METRIC "):
+            _, found = _extract_mcp_metrics(raw.decode("utf-8", errors="replace"))
+            if len(self.mcp_metrics) < 256:
+                self.mcp_metrics.extend(
+                    _safe_mcp_metric(metric)
+                    for metric in found[: 256 - len(self.mcp_metrics)]
+                )
+            return
+        try:
+            value = json.loads(raw)
+        except (UnicodeDecodeError, ValueError, RecursionError):
+            return
+        if not isinstance(value, dict):
+            return
+        kind = value.get("type")
+        if not isinstance(kind, str):
+            return
+        if kind in {"init", "message", "tool_call", "tool_result", "result", "error"}:
+            self.event_types[kind] = self.event_types.get(kind, 0) + 1
+        if kind == "result":
+            self.final = value
+            return
+        if kind != "stream_event" or value.get("parent_tool_use_id") is not None:
+            return
+        session = value.get("session_id")
+        if session != str(self.expected):
+            return
+        event = value.get("event")
+        if not isinstance(event, dict):
+            return
+        event_type = event.get("type")
+        if event_type == "message_start":
+            message = event.get("message")
+            self._assistant = (
+                isinstance(message, dict) and message.get("role") == "assistant"
+            )
+            self._text_blocks.clear()
+        elif event_type == "content_block_start" and self._assistant:
+            block = event.get("content_block")
+            index = event.get("index")
+            if (
+                type(index) is int
+                and isinstance(block, dict)
+                and block.get("type") == "text"
+            ):
+                self._text_blocks.add(index)
+        elif event_type == "content_block_stop":
+            index = event.get("index")
+            if type(index) is int:
+                self._text_blocks.discard(index)
+        elif event_type == "message_stop":
+            self._assistant = False
+            self._text_blocks.clear()
+        elif event_type == "content_block_delta" and self._assistant:
+            delta = event.get("delta")
+            index = event.get("index")
+            if (
+                type(index) is not int
+                or index not in self._text_blocks
+                or not isinstance(delta, dict)
+            ):
+                return
+            text = delta.get("text") if delta.get("type") == "text_delta" else None
+            if isinstance(text, str) and text:
+                self.text += text
+                if len(self.text) > 16_384:
+                    raise QwenRunnerFailure(QwenRunnerErrorCode.PROTOCOL_FAILURE)
+                if self.on_delta is not None:
+                    try:
+                        self.on_delta(text)
+                    except Exception:  # noqa: BLE001 - callback failure must preserve rollback
+                        raise QwenRunnerFailure(
+                            QwenRunnerErrorCode.OPERATION_FAILED
+                        ) from None
+
+    def finish(self) -> QwenExecution:
+        if self.buffer:
+            self._line(bytes(self.buffer))
+            self.buffer.clear()
+        if self.final is None or self.final.get("subtype") != "success":
+            raise QwenRunnerFailure(QwenRunnerErrorCode.PROTOCOL_FAILURE)
+        execution = _parse_qwen_result(self.final, self.expected)
+        if self.on_delta is not None and self.text and self.text != execution.response:
+            raise QwenRunnerFailure(QwenRunnerErrorCode.PROTOCOL_FAILURE)
+        return execution
+
+
+class _StreamingRedactor:
+    """Retain enough raw suffix to catch known secrets split across deltas."""
+
+    def __init__(self, secrets: tuple[str, ...], emit: Callable[[str], None]) -> None:
+        self._secrets = tuple(sorted(secrets, key=len, reverse=True))
+        self._hold = max((len(secret) - 1 for secret in secrets), default=0)
+        self._emit = emit
+        self._pending = ""
+        self.emitted = ""
+
+    def push(self, text: str) -> None:
+        self._pending += text
+        for secret in self._secrets:
+            self._pending = self._pending.replace(secret, "[REDACTED]")
+        if len(self._pending) > self._hold:
+            self._send(self._pending[: len(self._pending) - self._hold])
+            self._pending = self._pending[len(self._pending) - self._hold :]
+
+    def finish(self) -> None:
+        self._send(self._pending)
+        self._pending = ""
+
+    def _send(self, text: str) -> None:
+        if text:
+            self.emitted += text
+            self._emit(text)
 
 
 def _extract_mcp_metrics(output: str) -> tuple[str, tuple[dict[str, Any], ...]]:
@@ -573,7 +739,7 @@ def _extract_mcp_metrics(output: str) -> tuple[str, tuple[dict[str, Any], ...]]:
             continue
         try:
             value = json.loads(line.removeprefix("UAR_METRIC "))
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             clean.append(line)
             continue
         if not isinstance(value, dict) or value.get("kind") not in {
@@ -584,6 +750,25 @@ def _extract_mcp_metrics(output: str) -> tuple[str, tuple[dict[str, Any], ...]]:
             continue
         metrics.append(value)
     return "\n".join(clean), tuple(metrics)
+
+
+def _safe_mcp_metric(metric: dict[str, Any]) -> dict[str, Any]:
+    """Discard arbitrary MCP stderr fields before retaining a metric."""
+
+    return {
+        key: metric[key]
+        for key in (
+            "kind",
+            "tool_name",
+            "duration_ms",
+            "success",
+            "route",
+            "method",
+            "status_code",
+            "status_class",
+        )
+        if key in metric and type(metric[key]) in {str, int, float, bool}
+    }
 
 
 def _benchmark_environment(invocation: QwenInvocation) -> dict[str, str]:
@@ -637,9 +822,19 @@ def _emit_mcp_metrics(
         status = metric.get("status_code")
         status_class = metric.get("status_class")
         if (
-            route not in {"login", "entity_view_get", "entity_get", "entity_create", "entity_patch"}
+            route
+            not in {
+                "login",
+                "entity_view_get",
+                "entity_get",
+                "entity_create",
+                "entity_patch",
+            }
             or method not in {"GET", "POST", "PATCH"}
-            or (status is not None and (type(status) is not int or not 100 <= status <= 599))
+            or (
+                status is not None
+                and (type(status) is not int or not 100 <= status <= 599)
+            )
             or status_class not in {"2xx", "3xx", "4xx", "5xx", "error"}
         ):
             continue
@@ -687,6 +882,7 @@ def _emit_qwen_metric(
     output: str | None,
     execution_started_ns: int = 0,
     invocation: QwenInvocation | None = None,
+    event_types: dict[str, int] | None = None,
 ) -> None:
     if not enabled or not started_ns:
         return
@@ -700,7 +896,7 @@ def _emit_qwen_metric(
             (time.perf_counter_ns() - execution_started_ns) / 1_000_000, 3
         )
     if output is not None:
-        event_types: dict[str, int] = {}
+        event_types = {}
         for line in output.splitlines():
             try:
                 event = json.loads(line)
@@ -716,6 +912,8 @@ def _emit_qwen_metric(
                 "error",
             }:
                 event_types[event_type] = event_types.get(event_type, 0) + 1
+        values["stream_json_event_types"] = event_types
+    elif event_types is not None:
         values["stream_json_event_types"] = event_types
     if invocation is not None:
         values.update(_benchmark_correlation(invocation))
@@ -1095,7 +1293,9 @@ class QwenSessionAdapter:
     async def create_session(self, reference: SessionReference) -> SessionObservation:
         return await asyncio.to_thread(self._create_sync, reference)
 
-    def _execute_turn_sync(self, request: TurnRequest) -> TurnResult:
+    def _execute_turn_sync(
+        self, request: TurnRequest, on_delta: Callable[[str], None] | None = None
+    ) -> TurnResult:
         state = self._load_state(request.session, Op.TURN)
         history = self._read_history(state, Op.TURN)
         transcript = self._transcript(state, Op.TURN)
@@ -1112,20 +1312,33 @@ class QwenSessionAdapter:
                 Op.TURN, request.session, Code.OPERATION_FAILED
             ) from None
         try:
-            execution = self._runner.run(
-                QwenInvocation(
-                    self._qwen_home(request.session),
-                    self._workspace(request.session),
-                    state.native_session_id,
-                    prompt,
-                    resume=transcript is not None,
-                    current_message=request.message,
-                    benchmark_agent_id=request.session.agent_id.value,
-                    benchmark_turn_id=(
-                        f"{state.native_session_id}:{state.completed_turns + 1}"
-                    ),
-                )
+            invocation = QwenInvocation(
+                self._qwen_home(request.session),
+                self._workspace(request.session),
+                state.native_session_id,
+                prompt,
+                resume=transcript is not None,
+                current_message=request.message,
+                benchmark_agent_id=request.session.agent_id.value,
+                benchmark_turn_id=(
+                    f"{state.native_session_id}:{state.completed_turns + 1}"
+                ),
             )
+            redactor = (
+                _StreamingRedactor(self._secret_values(), on_delta)
+                if on_delta
+                else None
+            )
+            run_stream = getattr(self._runner, "run_stream", None)
+            if redactor is not None and callable(run_stream):
+                execution = run_stream(invocation, redactor.push)
+                redactor.finish()
+                if redactor.emitted and redactor.emitted != self._redact(
+                    execution.response
+                ):
+                    raise QwenRunnerFailure(QwenRunnerErrorCode.PROTOCOL_FAILURE)
+            else:
+                execution = self._runner.run(invocation)
         except QwenRunnerFailure as error:
             raise self._translate_runner_failure(request.session, error) from None
         if execution.native_session_id != state.native_session_id:
@@ -1168,7 +1381,9 @@ class QwenSessionAdapter:
             execution.response,
         )
 
-    def _turn_sync(self, request: TurnRequest) -> TurnResult:
+    def _turn_sync(
+        self, request: TurnRequest, on_delta: Callable[[str], None] | None = None
+    ) -> TurnResult:
         directory = self._agent_directory(request.session)
         marker = directory / ".turn-in-progress"
         if marker.exists():
@@ -1188,7 +1403,8 @@ class QwenSessionAdapter:
                     TurnRequest(
                         request.session,
                         self._redact(request.message),
-                    )
+                    ),
+                    on_delta,
                 )
             except InteractionFailure:
                 # The runner has exited: restore the last committed native and
@@ -1215,6 +1431,21 @@ class QwenSessionAdapter:
 
     async def turn(self, request: TurnRequest) -> TurnResult:
         return await asyncio.to_thread(self._turn_sync, request)
+
+    async def turn_stream(
+        self,
+        request: TurnRequest,
+        on_delta: Callable[[AssistantTextDelta], Awaitable[None]],
+    ) -> TurnResult:
+        loop = asyncio.get_running_loop()
+
+        async def forward(text: str) -> None:
+            await on_delta(AssistantTextDelta(text))
+
+        def emit(text: str) -> None:
+            asyncio.run_coroutine_threadsafe(forward(text), loop).result()
+
+        return await asyncio.to_thread(self._turn_sync, request, emit)
 
     def _secret_values(self) -> tuple[str, ...]:
         return tuple(

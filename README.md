@@ -26,9 +26,8 @@ Postman
 ```
 
 Orchestrator сохраняет владение Agent, его workspace и Qwen session. AG-UI
-добавляет только transport-адаптер к существующему committed turn: Qwen сначала
-формирует и фиксирует полный ответ, после чего AG-UI передаёт один
-`TEXT_MESSAGE_CONTENT` с полным `delta`. Это не token-level streaming.
+передаёт частичные `TEXT_MESSAGE_CONTENT` по мере вывода Qwen. История
+фиксируется только после успешного финального результата и проверки turn.
 
 ## Runtime
 
@@ -131,6 +130,22 @@ install `pip install -e ".[test]"`.
 
 ## AG-UI
 
+AG-UI streams Qwen assistant text as it arrives. The event order is
+`RUN_STARTED`, `TEXT_MESSAGE_START`, multiple `TEXT_MESSAGE_CONTENT` deltas,
+`TEXT_MESSAGE_END`, then `RUN_FINISHED`. The final two events follow a successful
+turn commit. A failed turn ends with `RUN_ERROR`; provisional deltas are not
+saved to history. The legacy `/agents/{id}/messages/stream` endpoint still
+returns only committed content.
+
+```bash
+curl -N -X POST 'http://127.0.0.1:8080/ag-ui/agents/<agent_id>/run' \
+  -H 'Content-Type: application/json' \
+  -d '{"threadId":"demo-thread","runId":"demo-run","state":{},"messages":[{"id":"demo-message","role":"user","content":"Explain the next step"}],"tools":[],"context":[],"forwardedProps":{}}'
+```
+
+`-N` disables curl's output buffering, so each `TEXT_MESSAGE_CONTENT` is visible
+as Qwen produces it.
+
 `POST /ag-ui/agents/{agent_id}/run` принимает официальный `RunAgentInput` с
 `threadId`, `runId`, `state`, `messages`, `tools`, `context` и
 `forwardedProps`. Текущая реализация принимает последний plain-text user message
@@ -143,6 +158,8 @@ Orchestrator.
 RUN_STARTED
 TEXT_MESSAGE_START
 TEXT_MESSAGE_CONTENT
+TEXT_MESSAGE_CONTENT
+...
 TEXT_MESSAGE_END
 RUN_FINISHED
 ```

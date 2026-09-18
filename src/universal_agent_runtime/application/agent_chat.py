@@ -17,17 +17,23 @@ from universal_agent_runtime.application.agent_lifecycle import (
 from universal_agent_runtime.application.agent_lifecycle import (
     AgentLifecycleOperation as Op,
 )
-from universal_agent_runtime.application.ports.agent_interaction import AgentInteraction
+from universal_agent_runtime.application.ports.agent_interaction import (
+    AgentInteraction,
+    StreamingAgentInteraction,
+)
 from universal_agent_runtime.application.ports.agent_repository import AgentRepository
 from universal_agent_runtime.application.ports.interaction_errors import (
     InteractionErrorCode,
     InteractionFailure,
 )
-from universal_agent_runtime.application.ports.interaction_values import TurnRequest
+from universal_agent_runtime.application.ports.interaction_values import (
+    AssistantTextDelta,
+    TurnRequest,
+)
+from universal_agent_runtime.benchmarking import emit_benchmark_metric
 from universal_agent_runtime.domain.agent import AgentLifecycleState as State
 from universal_agent_runtime.domain.identifiers import AgentId
 from universal_agent_runtime.domain.message import Message
-from universal_agent_runtime.benchmarking import emit_benchmark_metric
 
 
 @dataclass(frozen=True)
@@ -67,6 +73,32 @@ class AcceptedTurn:
     agent_id: AgentId
     turn_id: str
     task: asyncio.Task[tuple[Message, ...]] = field(repr=False)
+    assistant_message_id: str = ""
+    deltas: "TurnDeltas | None" = field(default=None, repr=False)
+
+
+class TurnDeltas:
+    """Bounded provisional channel; detaching the client unblocks inference."""
+
+    def __init__(self) -> None:
+        self.queue: asyncio.Queue[AssistantTextDelta] = asyncio.Queue(maxsize=16)
+        self._detached = asyncio.Event()
+
+    async def emit(self, delta: AssistantTextDelta) -> None:
+        if self._detached.is_set():
+            return
+        put = asyncio.create_task(self.queue.put(delta))
+        detached = asyncio.create_task(self._detached.wait())
+        try:
+            await asyncio.wait({put, detached}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (put, detached):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(put, detached, return_exceptions=True)
+
+    def detach(self) -> None:
+        self._detached.set()
 
 
 class AgentChatService:
@@ -118,7 +150,9 @@ class AgentChatService:
         turn = self.begin(agent_id, content)
         return await asyncio.shield(turn.task)
 
-    def begin(self, agent_id: AgentId, content: str) -> AcceptedTurn:
+    def begin(
+        self, agent_id: AgentId, content: str, *, stream: bool = False
+    ) -> AcceptedTurn:
         """Validate and reserve before HTTP headers; never await or queue a turn."""
         record = self._require(agent_id, Op.MESSAGE)
         if record.state is not State.READY or record.conversation_recovery_required:
@@ -141,12 +175,20 @@ class AgentChatService:
         busy = replace(record, state=State.BUSY, failure=None)
         self._repository.save(busy)
         turn_id = uuid4().hex
-        task = asyncio.create_task(self._complete(busy, request, turn_id))
+        assistant_message_id = uuid4().hex
+        deltas = (
+            TurnDeltas()
+            if stream and isinstance(self._interaction, StreamingAgentInteraction)
+            else None
+        )
+        task = asyncio.create_task(
+            self._complete(busy, request, turn_id, assistant_message_id, deltas)
+        )
         self._pending.add(task)
         task.add_done_callback(self._finished)
         # Disconnect/caller cancellation must not release BUSY while an adapter
         # thread still writes native state. The owned task commits its outcome.
-        return AcceptedTurn(agent_id, turn_id, task)
+        return AcceptedTurn(agent_id, turn_id, task, assistant_message_id, deltas)
 
     def _finished(self, task: asyncio.Task[tuple[Message, ...]]) -> None:
         self._pending.discard(task)
@@ -180,14 +222,32 @@ class AgentChatService:
         )
 
     async def _complete(
-        self, record: AgentRecord, request: TurnRequest, turn_id: str
+        self,
+        record: AgentRecord,
+        request: TurnRequest,
+        turn_id: str,
+        assistant_message_id: str,
+        deltas: TurnDeltas | None,
     ) -> tuple[Message, ...]:
         started = datetime.now(UTC)
-        turn_started_ns = time.perf_counter_ns() if self._configuration.benchmark_timing_enabled else 0
+        turn_started_ns = (
+            time.perf_counter_ns()
+            if self._configuration.benchmark_timing_enabled
+            else 0
+        )
         try:
-            interaction_started_ns = time.perf_counter_ns() if self._configuration.benchmark_timing_enabled else 0
+            interaction_started_ns = (
+                time.perf_counter_ns()
+                if self._configuration.benchmark_timing_enabled
+                else 0
+            )
             try:
-                result = await self._interaction.turn(request)
+                if deltas is not None and isinstance(
+                    self._interaction, StreamingAgentInteraction
+                ):
+                    result = await self._interaction.turn_stream(request, deltas.emit)
+                else:
+                    result = await self._interaction.turn(request)
             finally:
                 if interaction_started_ns:
                     emit_benchmark_metric(
@@ -219,7 +279,7 @@ class AgentChatService:
                     started,
                 ),
                 Message(
-                    uuid4().hex,
+                    assistant_message_id,
                     turn_id,
                     len(record.messages) + 2,
                     "assistant",

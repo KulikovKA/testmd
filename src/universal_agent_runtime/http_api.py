@@ -941,7 +941,8 @@ def create_application(composition: ApplicationComposition) -> FastAPI:
                 thread_id=input.threadId,
                 run_id=input.runId,
                 heartbeat_seconds=settings.stream_heartbeat_seconds,
-            )
+            ),
+            send_timeout_seconds=settings.stream_send_timeout_seconds,
         )
 
     return app

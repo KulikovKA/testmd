@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from tests.test_runtime_driver import _DockerClient, _environment
 from universal_agent_runtime.adapters.docker_runtime import DockerRuntime, DockerWorkload
 from universal_agent_runtime.application.ports.interaction_values import (
+    AssistantTextDelta,
     DeleteSessionResult,
     SessionObservation,
     SessionReference,
@@ -53,6 +54,16 @@ class _Interaction:
         self._sessions.clear()
 
 
+class _StreamingInteraction(_Interaction):
+    async def turn_stream(self, request: TurnRequest, on_delta) -> TurnResult:
+        pieces = ("answer:", " ", request.message)
+        for piece in pieces:
+            await on_delta(AssistantTextDelta(piece))
+        turns = self._turns.setdefault(request.session, [])
+        turns.append(request.message)
+        return TurnResult(request.session, len(turns), "".join(pieces))
+
+
 def _events(response_text: str) -> list[dict[str, object]]:
     return [
         json.loads(line[6:])
@@ -62,7 +73,7 @@ def _events(response_text: str) -> list[dict[str, object]]:
 
 
 class AGUIHttpTests(unittest.TestCase):
-    def _app(self, root: Path):
+    def _app(self, root: Path, interaction: _Interaction | None = None):
         settings = ApplicationSettings.from_environment(
             {
                 **_environment("docker"),
@@ -80,7 +91,7 @@ class AGUIHttpTests(unittest.TestCase):
             secret_resolver=lambda _secret_id: "test-secret",
             client=_DockerClient(),
         )
-        self.interaction = _Interaction()
+        self.interaction = interaction or _Interaction()
         return create_application(
             compose_application(settings, runtime=runtime, interaction=self.interaction)
         )
@@ -124,6 +135,23 @@ class AGUIHttpTests(unittest.TestCase):
         self.assertEqual(events[1]["messageId"], events[2]["messageId"])
         self.assertEqual(events[2]["messageId"], events[3]["messageId"])
         self.assertEqual(events[2]["delta"], "answer: decompose this")
+
+    def test_http_run_forwards_three_live_deltas_with_one_public_message_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with TestClient(self._app(Path(directory), _StreamingInteraction())) as client:
+                created = client.post("/agents", json={"request_id": "ag-ui-stream"})
+                agent_id = created.json()["agent_id"]
+                self.assertEqual(client.post(f"/agents/{agent_id}/start").status_code, 200)
+                response = client.post(f"/ag-ui/agents/{agent_id}/run", json=self._input())
+                history = client.get(f"/agents/{agent_id}/messages")
+        events = _events(response.text)
+        content = [event for event in events if event["type"] == "TEXT_MESSAGE_CONTENT"]
+        self.assertEqual([event["delta"] for event in content], ["answer:", " ", "decompose this"])
+        self.assertEqual([event["type"] for event in events].count("TEXT_MESSAGE_START"), 1)
+        self.assertEqual([event["type"] for event in events].count("TEXT_MESSAGE_END"), 1)
+        self.assertEqual(events[-1]["type"], "RUN_FINISHED")
+        self.assertEqual({event["messageId"] for event in events if "messageId" in event}, {content[0]["messageId"]})
+        self.assertEqual(history.json()["messages"][1]["content"], "".join(event["delta"] for event in content))
 
     def test_unknown_or_unready_agent_ends_with_ag_ui_error(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

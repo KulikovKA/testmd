@@ -207,6 +207,7 @@ if __name__ == "__main__":
 class _SkillClient:
     def __init__(self, container: _SkillContainer) -> None:
         self.containers = self
+        self.api = self
         self._container = container
 
     def list(self, **_: object) -> list[_SkillContainer]:
@@ -214,6 +215,19 @@ class _SkillClient:
 
     def close(self) -> None:
         return None
+
+    def exec_create(
+        self, _container_id: str, command: list[str], **_: object
+    ) -> dict[str, str]:
+        self._container.qwen_command = command
+        return {"Id": "test-exec"}
+
+    def exec_start(self, _exec_id: str, **_: object):
+        result = self._container.qwen_result()
+        yield result.output, None
+
+    def exec_inspect(self, _exec_id: str) -> dict[str, int]:
+        return {"ExitCode": 0}
 
 
 class _ExecResult:
@@ -224,6 +238,7 @@ class _ExecResult:
 
 class _SkillContainer:
     status = "running"
+    id = "test-container"
 
     def __init__(self, session_id: object, environment: list[str]) -> None:
         self.attrs = {"Config": {"Env": environment}}
@@ -237,6 +252,9 @@ class _SkillContainer:
     def exec_run(self, command: list[str], **_: object) -> _ExecResult:
         if command[:2] == ["node", "-e"]:
             return _ExecResult(b"")
+        raise AssertionError("Qwen execution must use streaming exec API")
+
+    def qwen_result(self) -> _ExecResult:
         return _ExecResult(
             json.dumps(
                 {

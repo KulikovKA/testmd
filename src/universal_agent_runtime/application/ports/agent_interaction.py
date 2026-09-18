@@ -1,8 +1,10 @@
 """Conversation/session port, deliberately separate from runtime lifecycle."""
 
+from collections.abc import Awaitable, Callable
 from typing import Protocol, runtime_checkable
 
 from universal_agent_runtime.application.ports.interaction_values import (
+    AssistantTextDelta,
     DeleteSessionResult,
     SessionDebugSnapshot,
     SessionObservation,
@@ -40,4 +42,17 @@ class AgentInteraction(Protocol):
 class AgentDebugReader(Protocol):
     """Optional read-only view of adapter-owned observability data."""
 
-    async def debug_snapshot(self, reference: SessionReference) -> SessionDebugSnapshot: ...
+    async def debug_snapshot(
+        self, reference: SessionReference
+    ) -> SessionDebugSnapshot: ...
+
+
+@runtime_checkable
+class StreamingAgentInteraction(Protocol):
+    """Optional semantic text stream; final TurnResult still owns the commit."""
+
+    async def turn_stream(
+        self,
+        request: TurnRequest,
+        on_delta: Callable[[AssistantTextDelta], Awaitable[None]],
+    ) -> TurnResult: ...

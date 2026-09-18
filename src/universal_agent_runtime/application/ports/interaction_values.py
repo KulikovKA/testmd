@@ -61,6 +61,13 @@ class TurnResult:
 
 
 @dataclass(frozen=True)
+class AssistantTextDelta:
+    """Provisional, transport-neutral assistant text from a running turn."""
+
+    text: str = field(repr=False)
+
+
+@dataclass(frozen=True)
 class DeleteSessionResult:
     session: SessionReference
 

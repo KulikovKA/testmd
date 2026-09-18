@@ -3,6 +3,7 @@
 import io
 import tarfile
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -16,15 +17,16 @@ from universal_agent_runtime.adapters.qwen_session import (
     DockerQwenCommandRunner,
     QwenExecution,
     QwenInvocation,
+    QwenJSONLStream,
     QwenRunnerFailure,
     QwenSessionConfig,
-    _classify_runner_output,
     _benchmark_environment,
+    _classify_runner_output,
     _emit_mcp_metrics,
     _emit_mcp_summary,
     _emit_qwen_metric,
     _extract_mcp_metrics,
-    _parse_qwen_output,
+    _safe_mcp_metric,
 )
 from universal_agent_runtime.adapters.qwen_session import (
     QwenRunnerErrorCode as Code,
@@ -62,10 +64,17 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
         self._skill_catalog = skill_catalog or SkillPackageCatalog.builtins()
 
     def run(self, invocation: QwenInvocation) -> QwenExecution:
+        return self.run_stream(invocation, None)
+
+    def run_stream(
+        self, invocation: QwenInvocation, on_delta: Callable[[str], None] | None
+    ) -> QwenExecution:
         agent_id = AgentId(invocation.workspace.parent.name)
-        started_ns = time.perf_counter_ns() if self._config.benchmark_timing_enabled else 0
+        started_ns = (
+            time.perf_counter_ns() if self._config.benchmark_timing_enabled else 0
+        )
         execution_started_ns = 0
-        metric_output: str | None = None
+        event_types: dict[str, int] | None = None
         prefix = "io.universal-agent-runtime"
         home = f"{self._workspace_target}/.qwen-home"
         try:
@@ -179,7 +188,8 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
             execution_started_ns = (
                 time.perf_counter_ns() if self._config.benchmark_timing_enabled else 0
             )
-            outcome = container.exec_run(
+            created = self._client.api.exec_create(
+                container.id,
                 self.command(invocation),
                 workdir=self._workspace_target,
                 environment={
@@ -199,22 +209,83 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
                     **self._task_environment(invocation.task_operations),
                 },
             )
-            if not isinstance(outcome.output, bytes):
+            exec_id = created.get("Id") if isinstance(created, dict) else None
+            if not isinstance(exec_id, str) or not exec_id:
                 raise QwenRunnerFailure(Code.PROTOCOL_FAILURE)
-            output = outcome.output.decode("utf-8", errors="replace")
-            clean_output, mcp_metrics = _extract_mcp_metrics(output)
-            metric_output = clean_output
+            parser = QwenJSONLStream(invocation.native_session_id, on_delta)
+            error_tail = bytearray()
+            metric_tail = bytearray()
+            metrics: list[dict[str, Any]] = []
+            parse_failure: QwenRunnerFailure | None = None
+            inference_unavailable = False
+            stream = self._client.api.exec_start(exec_id, stream=True, demux=True)
+            try:
+                for stdout, stderr in stream:
+                    for part in (stdout, stderr):
+                        if part:
+                            error_tail.extend(part)
+                            if len(error_tail) > 8192:
+                                del error_tail[:-8192]
+                            inference_unavailable |= (
+                                _classify_runner_output(
+                                    error_tail.decode("utf-8", errors="replace")
+                                )
+                                == Code.INFERENCE_UNAVAILABLE
+                            )
+                    if stdout and parse_failure is None:
+                        try:
+                            parser.feed(stdout)
+                        except QwenRunnerFailure as failure:
+                            parse_failure = failure
+                    if stderr:
+                        metric_tail.extend(stderr)
+                        if len(metric_tail) > 262_144:
+                            metric_tail.clear()
+                        while b"\n" in metric_tail:
+                            line, _, remainder = metric_tail.partition(b"\n")
+                            metric_tail = bytearray(remainder)
+                            _, found = _extract_mcp_metrics(
+                                line.decode("utf-8", errors="replace")
+                            )
+                            if len(metrics) < 256:
+                                metrics.extend(
+                                    _safe_mcp_metric(metric)
+                                    for metric in found[: 256 - len(metrics)]
+                                )
+            finally:
+                stream.close()
+            if metric_tail:
+                _, found = _extract_mcp_metrics(
+                    metric_tail.decode("utf-8", errors="replace")
+                )
+                if len(metrics) < 256:
+                    metrics.extend(
+                        _safe_mcp_metric(metric)
+                        for metric in found[: 256 - len(metrics)]
+                    )
+            event_types = parser.event_types
+            mcp_metrics = tuple((parser.mcp_metrics + metrics)[:256])
             _emit_mcp_metrics(
                 self._config.benchmark_timing_enabled, mcp_metrics, invocation
             )
             _emit_mcp_summary(
                 self._config.benchmark_timing_enabled, mcp_metrics, invocation
             )
-            if outcome.exit_code == 55:
+            inspection = self._client.api.exec_inspect(exec_id)
+            status = (
+                inspection.get("ExitCode") if isinstance(inspection, dict) else None
+            )
+            if status == 55:
                 raise QwenRunnerFailure(Code.TIMEOUT)
-            if outcome.exit_code != 0:
-                raise QwenRunnerFailure(_classify_runner_output(clean_output))
-            execution = _parse_qwen_output(clean_output, invocation.native_session_id)
+            if type(status) is not int or status != 0:
+                raise QwenRunnerFailure(
+                    Code.INFERENCE_UNAVAILABLE
+                    if inference_unavailable
+                    else Code.OPERATION_FAILED
+                )
+            if parse_failure is not None:
+                raise parse_failure
+            execution = parser.finish()
             chunks, _ = container.get_archive(home)
             self._receive(invocation, chunks)
             return execution
@@ -226,9 +297,10 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
             _emit_qwen_metric(
                 self._config.benchmark_timing_enabled,
                 started_ns,
-                metric_output,
+                None,
                 execution_started_ns,
                 invocation,
+                event_types,
             )
 
     def _environment_values(self, container: object) -> dict[str, str]:
@@ -282,9 +354,7 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
             "UAR_SFERA_TIMEOUT_MS": str(
                 round(self._config.sfera_timeout_seconds * 1000)
             ),
-            "UAR_SFERA_MAX_RESPONSE_BYTES": str(
-                self._config.sfera_max_response_bytes
-            ),
+            "UAR_SFERA_MAX_RESPONSE_BYTES": str(self._config.sfera_max_response_bytes),
         }
         if self._config.sfera_username is not None:
             result["UAR_SFERA_USERNAME"] = self._config.sfera_username
@@ -295,9 +365,7 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
         ):
             result["UAR_SFERA_DEFAULT_OWNER"] = self._config.sfera_default_owner
         if self._config.sfera_ca_cert_path is not None:
-            result["NODE_EXTRA_CA_CERTS"] = (
-                self._config.sfera_ca_cert_container_path
-            )
+            result["NODE_EXTRA_CA_CERTS"] = self._config.sfera_ca_cert_container_path
         return result
 
     def _receive(self, invocation: QwenInvocation, chunks: object) -> None:

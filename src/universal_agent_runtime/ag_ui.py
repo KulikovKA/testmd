@@ -1,4 +1,4 @@
-"""Minimal AG-UI SSE transport over the existing committed-turn chat service."""
+"""AG-UI SSE transport over the application-owned turn."""
 
 import asyncio
 import json
@@ -7,8 +7,13 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from starlette.responses import StreamingResponse
+from starlette.types import Message as ASGIMessage
+from starlette.types import Send
 
-from universal_agent_runtime.application.agent_chat import AcceptedTurn, AgentChatService
+from universal_agent_runtime.application.agent_chat import (
+    AcceptedTurn,
+    AgentChatService,
+)
 from universal_agent_runtime.application.agent_lifecycle import (
     AgentLifecycleErrorCode,
     AgentLifecycleFailure,
@@ -58,7 +63,11 @@ class RunAgentInput(BaseModel):
 
 def _event(payload: dict[str, Any]) -> bytes:
     # The AG-UI EventEncoder SSE form is one JSON event in a data field.
-    return ("data: " + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n\n").encode()
+    return (
+        "data: "
+        + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        + "\n\n"
+    ).encode()
 
 
 def safe_failure(failure: AgentLifecycleFailure) -> tuple[str, str]:
@@ -84,43 +93,103 @@ async def ag_ui_events(
 ) -> AsyncGenerator[bytes, None]:
     """Emit a standard AG-UI lifecycle around the single application-owned turn."""
 
-    yield _event({"type": "RUN_STARTED", "threadId": thread_id, "runId": run_id})
-    while not turn.task.done():
-        done, _ = await asyncio.wait({turn.task}, timeout=heartbeat_seconds)
-        if not done:
-            yield b": keep-alive\n\n"
+    started = False
     try:
-        messages = turn.task.result()
-    except AgentLifecycleFailure as failure:
-        code, message = safe_failure(failure)
-        yield _event({"type": "RUN_ERROR", "message": message, "code": code})
-        return
-    except asyncio.CancelledError:
-        yield _event(
-            {
-                "type": "RUN_ERROR",
-                "message": "Agent run was cancelled",
-                "code": "interaction_failed",
-            }
-        )
-        return
-    assistant = messages[1]
-    yield _event(
-        {
-            "type": "TEXT_MESSAGE_START",
-            "messageId": assistant.message_id,
-            "role": "assistant",
-        }
-    )
-    yield _event(
-        {
-            "type": "TEXT_MESSAGE_CONTENT",
-            "messageId": assistant.message_id,
-            "delta": assistant.content,
-        }
-    )
-    yield _event({"type": "TEXT_MESSAGE_END", "messageId": assistant.message_id})
-    yield _event({"type": "RUN_FINISHED", "threadId": thread_id, "runId": run_id})
+        yield _event({"type": "RUN_STARTED", "threadId": thread_id, "runId": run_id})
+        while True:
+            if turn.deltas is not None and not turn.deltas.queue.empty():
+                delta = turn.deltas.queue.get_nowait().text
+                if not started:
+                    started = True
+                    yield _event(
+                        {
+                            "type": "TEXT_MESSAGE_START",
+                            "messageId": turn.assistant_message_id,
+                            "role": "assistant",
+                        }
+                    )
+                yield _event(
+                    {
+                        "type": "TEXT_MESSAGE_CONTENT",
+                        "messageId": turn.assistant_message_id,
+                        "delta": delta,
+                    }
+                )
+                continue
+            if turn.task.done():
+                break
+            if turn.deltas is None:
+                done, _ = await asyncio.wait({turn.task}, timeout=heartbeat_seconds)
+            else:
+                received = asyncio.create_task(turn.deltas.queue.get())
+                try:
+                    waiters: set[asyncio.Task[Any]] = {turn.task, received}
+                    done, _ = await asyncio.wait(
+                        waiters,
+                        timeout=heartbeat_seconds,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if received in done:
+                        delta = received.result().text
+                        if not started:
+                            started = True
+                            yield _event(
+                                {
+                                    "type": "TEXT_MESSAGE_START",
+                                    "messageId": turn.assistant_message_id,
+                                    "role": "assistant",
+                                }
+                            )
+                        yield _event(
+                            {
+                                "type": "TEXT_MESSAGE_CONTENT",
+                                "messageId": turn.assistant_message_id,
+                                "delta": delta,
+                            }
+                        )
+                        continue
+                finally:
+                    if not received.done():
+                        received.cancel()
+                    await asyncio.gather(received, return_exceptions=True)
+            if not done:
+                yield b": keep-alive\n\n"
+        try:
+            messages = turn.task.result()
+        except AgentLifecycleFailure as failure:
+            code, message = safe_failure(failure)
+            yield _event({"type": "RUN_ERROR", "message": message, "code": code})
+            return
+        except asyncio.CancelledError:
+            yield _event(
+                {
+                    "type": "RUN_ERROR",
+                    "message": "Agent run was cancelled",
+                    "code": "interaction_failed",
+                }
+            )
+            return
+        assistant = messages[1]
+        if not started:
+            yield _event(
+                {
+                    "type": "TEXT_MESSAGE_START",
+                    "messageId": assistant.message_id,
+                    "role": "assistant",
+                }
+            )
+            yield _event(
+                {
+                    "type": "TEXT_MESSAGE_CONTENT",
+                    "messageId": assistant.message_id,
+                    "delta": assistant.content,
+                }
+            )
+        yield _event({"type": "TEXT_MESSAGE_END", "messageId": assistant.message_id})
+        yield _event({"type": "RUN_FINISHED", "threadId": thread_id, "runId": run_id})
+    finally:
+        if turn.deltas is not None:
+            turn.deltas.detach()
 
 
 async def ag_ui_error_events(
@@ -134,12 +203,29 @@ async def ag_ui_error_events(
 class AGUIEventResponse(StreamingResponse):
     """SSE response using the official AG-UI event framing."""
 
-    def __init__(self, content: AsyncGenerator[bytes, None]) -> None:
+    def __init__(
+        self, content: AsyncGenerator[bytes, None], *, send_timeout_seconds: float = 30
+    ) -> None:
+        self._events = content
+        self._send_timeout_seconds = send_timeout_seconds
         super().__init__(
             content,
             media_type="text/event-stream",
             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
         )
+
+    async def stream_response(self, send: Send) -> None:
+        async def bounded_send(message: ASGIMessage) -> None:
+            try:
+                async with asyncio.timeout(self._send_timeout_seconds):
+                    await send(message)
+            except TimeoutError:
+                raise OSError("event stream send timed out") from None
+
+        try:
+            await super().stream_response(bounded_send)
+        finally:
+            await self._events.aclose()
 
 
 def parse_run_input(raw: object) -> tuple[RunAgentInput | None, str | None, str | None]:
@@ -160,7 +246,9 @@ def parse_run_input(raw: object) -> tuple[RunAgentInput | None, str | None, str 
         return None, thread_id, run_id
 
 
-def begin_run(chat: AgentChatService, agent_id: str, input: RunAgentInput) -> AcceptedTurn:
+def begin_run(
+    chat: AgentChatService, agent_id: str, input: RunAgentInput
+) -> AcceptedTurn:
     """Keep Agent identity and lifecycle checks in the existing application service."""
 
-    return chat.begin(AgentId(agent_id), input.current_message)
+    return chat.begin(AgentId(agent_id), input.current_message, stream=True)
