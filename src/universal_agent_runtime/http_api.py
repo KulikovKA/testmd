@@ -34,6 +34,9 @@ from universal_agent_runtime.application.agent_lifecycle import (
 from universal_agent_runtime.application.ports.interaction_errors import (
     InteractionErrorCode,
 )
+from universal_agent_runtime.application.ports.interaction_values import (
+    SessionDebugSnapshot,
+)
 from universal_agent_runtime.application.ports.skill_store import (
     MAX_ARCHIVE_BYTES,
     SkillDescriptor,
@@ -229,6 +232,101 @@ class AgentResponse(BaseModel):
                 if record.failure is not None
                 else None
             ),
+        )
+
+
+class AgentDebugIdentityResponse(BaseModel):
+    agent_id: str
+    workspace_id: str
+    session_id: str
+    state: AgentLifecycleState
+
+
+class QwenDebugResponse(BaseModel):
+    model: str | None
+    native_session_id: str | None
+    completed_turns: int | None
+    transcript_present: bool
+
+
+class WorkspaceDebugResponse(BaseModel):
+    skills: list[str]
+    mcp_server_present: bool
+
+
+class TurnTelemetryResponse(BaseModel):
+    duration_ms: int | float | None = None
+    ttft_ms: int | float | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    thoughts_tokens: int | None = None
+    total_tokens: int | None = None
+
+
+class LastTurnDebugResponse(BaseModel):
+    user_message_present: bool
+    assistant_message_present: bool
+    qwen_events: dict[str, int]
+    telemetry: TurnTelemetryResponse
+    mcp_tool_names: list[str]
+
+
+class AgentDebugReportResponse(BaseModel):
+    agent: AgentDebugIdentityResponse
+    runtime: RuntimeObservationResponse | None
+    configuration: AgentConfigurationResponse
+    qwen: QwenDebugResponse
+    workspace: WorkspaceDebugResponse
+    last_turn: LastTurnDebugResponse | None
+    failure: AgentFailureResponse | None
+    conversation_recovery_required: bool
+
+    @classmethod
+    def from_observation(
+        cls, record: AgentRecord, snapshot: SessionDebugSnapshot
+    ) -> "AgentDebugReportResponse":
+        agent = AgentResponse.from_record(record)
+        user_present = snapshot.last_user_message_present or any(
+            message.role == "user" for message in record.messages
+        )
+        assistant_present = snapshot.last_assistant_message_present or any(
+            message.role == "assistant" for message in record.messages
+        )
+        return cls(
+            agent=AgentDebugIdentityResponse(
+                agent_id=agent.agent_id,
+                workspace_id=agent.workspace_id,
+                session_id=agent.session_id,
+                state=agent.state,
+            ),
+            runtime=agent.runtime,
+            configuration=agent.configuration,
+            qwen=QwenDebugResponse(
+                model=snapshot.model,
+                native_session_id=snapshot.native_session_id,
+                completed_turns=snapshot.completed_turns,
+                transcript_present=snapshot.transcript_present,
+            ),
+            workspace=WorkspaceDebugResponse(
+                skills=list(record.configuration.skills),
+                mcp_server_present=snapshot.mcp_server_present,
+            ),
+            last_turn=(
+                LastTurnDebugResponse(
+                    user_message_present=user_present,
+                    assistant_message_present=assistant_present,
+                    qwen_events={
+                        name: snapshot.event_counts.get(name, 0)
+                        for name in ("user", "system", "assistant", "tool_call", "tool_result")
+                    },
+                    telemetry=TurnTelemetryResponse.model_validate(snapshot.telemetry),
+                    mcp_tool_names=list(snapshot.mcp_tool_names),
+                )
+                if user_present or assistant_present
+                else None
+            ),
+            failure=agent.failure,
+            conversation_recovery_required=agent.conversation_recovery_required,
         )
 
 
@@ -584,6 +682,20 @@ def create_application(composition: ApplicationComposition) -> FastAPI:
     )
     async def inspect_agent(agent_id: AgentPath) -> AgentResponse:
         return AgentResponse.from_record(lifecycle.inspect(AgentId(agent_id)))
+
+    @app.get(
+        "/agents/{agent_id}/debug-report",
+        response_model=AgentDebugReportResponse,
+        responses=lifecycle_errors,
+    )
+    async def agent_debug_report(agent_id: AgentPath) -> AgentDebugReportResponse:
+        record = lifecycle.inspect(AgentId(agent_id))
+        snapshot = (
+            await composition.debug_reader.debug_snapshot(record.session)
+            if composition.debug_reader is not None
+            else SessionDebugSnapshot()
+        )
+        return AgentDebugReportResponse.from_observation(record, snapshot)
 
     @app.post(
         "/agents/{agent_id}/start",

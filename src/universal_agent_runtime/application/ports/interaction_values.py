@@ -67,3 +67,19 @@ class DeleteSessionResult:
     def __post_init__(self) -> None:
         if not isinstance(self.session, SessionReference):
             raise TypeError("invalid Session reference")
+
+
+@dataclass(frozen=True)
+class SessionDebugSnapshot:
+    """Allowlisted, read-only observation of adapter-owned session artifacts."""
+
+    model: str | None = None
+    native_session_id: str | None = None
+    completed_turns: int | None = None
+    transcript_present: bool = False
+    event_counts: dict[str, int] = field(default_factory=dict)
+    telemetry: dict[str, int | float | None] = field(default_factory=dict)
+    mcp_tool_names: tuple[str, ...] = ()
+    last_user_message_present: bool = False
+    last_assistant_message_present: bool = False
+    mcp_server_present: bool = False

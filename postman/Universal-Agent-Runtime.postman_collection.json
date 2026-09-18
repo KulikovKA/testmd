@@ -115,6 +115,13 @@
       }
     },
     {
+      "name": "Agent Debug Report",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/agents/{{agent_id}}/debug-report"
+      }
+    },
+    {
       "name": "Create development Skills Agent (no tools)",
       "request": {
         "method": "POST",

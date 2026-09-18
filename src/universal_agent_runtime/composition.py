@@ -28,7 +28,10 @@ from universal_agent_runtime.application.agent_lifecycle import (
     AgentLifecycleService,
     LifecycleConfiguration,
 )
-from universal_agent_runtime.application.ports.agent_interaction import AgentInteraction
+from universal_agent_runtime.application.ports.agent_interaction import (
+    AgentDebugReader,
+    AgentInteraction,
+)
 from universal_agent_runtime.application.ports.agent_repository import AgentRepository
 from universal_agent_runtime.application.ports.agent_runtime import AgentRuntime
 from universal_agent_runtime.application.ports.runtime_values import (
@@ -53,6 +56,7 @@ class ApplicationComposition:
     chat: AgentChatService | None = None
     skills: SkillManagementService | None = None
     skill_catalog: SkillPackageCatalog | None = None
+    debug_reader: AgentDebugReader | None = None
     package_name: str = "universal_agent_runtime"
 
     async def close(self) -> None:
@@ -127,6 +131,7 @@ def compose_application(
         chat,
         skills=SkillManagementService(catalog),
         skill_catalog=catalog,
+        debug_reader=interaction if isinstance(interaction, AgentDebugReader) else None,
     )
 
 

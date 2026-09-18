@@ -26,13 +26,14 @@ from universal_agent_runtime.application.ports.interaction_errors import (
 )
 from universal_agent_runtime.application.ports.interaction_values import (
     DeleteSessionResult,
+    SessionDebugSnapshot,
     SessionObservation,
     SessionReference,
     TurnRequest,
     TurnResult,
 )
-from universal_agent_runtime.domain.identifiers import validate_identifier
 from universal_agent_runtime.benchmarking import emit_benchmark_metric
+from universal_agent_runtime.domain.identifiers import validate_identifier
 
 QWEN_CODE_VERSION = "0.23.1"
 QWEN_IMAGE = (
@@ -67,6 +68,98 @@ _TASK_SYSTEM_PROMPT = (
 TASK_TOOL_OPERATIONS = ("get_task", "create_task", "create_epic", "add_child_task")
 TASK_CREATION_OPERATIONS = ("create_task", "create_epic")
 TASK_MUTATION_OPERATIONS = (*TASK_CREATION_OPERATIONS, "add_child_task")
+_DEBUG_EVENT_TYPES = ("user", "system", "assistant", "tool_call", "tool_result")
+_DEBUG_METRICS = (
+    "duration_ms",
+    "ttft_ms",
+    "input_tokens",
+    "output_tokens",
+    "thoughts_tokens",
+    "total_tokens",
+)
+_DEBUG_METRIC_KEYS = {
+    "duration_ms": ("duration_ms",),
+    "ttft_ms": ("ttft_ms",),
+    "input_tokens": ("input_tokens", "input_token_count", "promptTokenCount"),
+    "output_tokens": ("output_tokens", "output_token_count", "candidatesTokenCount"),
+    "thoughts_tokens": ("thoughts_tokens", "thoughts_token_count", "thoughtsTokenCount"),
+    "total_tokens": ("total_tokens", "total_token_count", "totalTokenCount"),
+}
+
+
+def _debug_transcript_summary(
+    lines: list[str],
+) -> tuple[dict[str, int], dict[str, int | float | None], tuple[str, ...]]:
+    """Extract only known event types, numeric metrics, and known MCP names."""
+
+    events = [json.loads(line) for line in lines]
+    if not all(isinstance(event, dict) for event in events):
+        raise ValueError("invalid transcript event")
+    def parts(event: dict[str, Any]) -> list[dict[str, Any]]:
+        message = event.get("message")
+        values = message.get("parts") if isinstance(message, dict) else None
+        return [part for part in values if isinstance(part, dict)] if isinstance(values, list) else []
+
+    last_user = max(
+        (
+            index
+            for index, event in enumerate(events)
+            if event.get("type") == "user"
+            and not any("functionResponse" in part for part in parts(event))
+        ),
+        default=0,
+    )
+    current = events[last_user:]
+    counts = {name: 0 for name in _DEBUG_EVENT_TYPES}
+    telemetry: dict[str, int | float | None] = {name: None for name in _DEBUG_METRICS}
+    tool_names: list[str] = []
+    for event in current:
+        kind = event.get("type")
+        event_parts = parts(event)
+        function_response = any("functionResponse" in part for part in event_parts)
+        if isinstance(kind, str) and kind in counts and not (kind == "user" and function_response):
+            counts[kind] += 1
+        if kind == "tool_call":
+            name = event.get("tool_name", event.get("name"))
+            if name in TASK_TOOL_OPERATIONS and name not in tool_names:
+                tool_names.append(name)
+        for part in event_parts:
+            call = part.get("functionCall")
+            result = part.get("functionResponse")
+            if isinstance(call, dict):
+                if kind != "tool_call":
+                    counts["tool_call"] += 1
+                name = call.get("name")
+                if name in TASK_TOOL_OPERATIONS and name not in tool_names:
+                    tool_names.append(name)
+            if isinstance(result, dict) and kind != "tool_result":
+                counts["tool_result"] += 1
+        if not isinstance(kind, str) or kind not in {*_DEBUG_EVENT_TYPES, "result"}:
+            continue
+        system_payload = event.get("systemPayload")
+        ui_event = system_payload.get("uiEvent") if isinstance(system_payload, dict) else None
+        # Qwen JSONL uses uiEvent and usageMetadata; older outputs can use
+        # flat fields, usage or stats.
+        for source in (
+            event,
+            event.get("usage"),
+            event.get("stats"),
+            event.get("usageMetadata"),
+            ui_event,
+        ):
+            if not isinstance(source, dict):
+                continue
+            for metric in _DEBUG_METRICS:
+                for key in _DEBUG_METRIC_KEYS[metric]:
+                    value = source.get(key)
+                    if not isinstance(value, (int, float)) or isinstance(value, bool):
+                        continue
+                    if not metric.endswith("_ms") and not isinstance(value, int):
+                        continue
+                    if 0 <= value <= 1_000_000_000_000:
+                        telemetry[metric] = value
+                        break
+    return counts, telemetry, tuple(tool_names)
 
 
 @dataclass(frozen=True)
@@ -894,6 +987,52 @@ class QwenSessionAdapter:
                 operation, state.reference, Code.CORRUPT_STATE
             ) from None
         return transcript
+
+    def _debug_snapshot_sync(self, reference: SessionReference) -> SessionDebugSnapshot:
+        snapshot = SessionDebugSnapshot(
+            model=self._config.model,
+            mcp_server_present=self._task_mcp_server(reference).is_file(),
+        )
+        try:
+            state = self._load_state(reference, Op.INSPECT)
+        except InteractionFailure:
+            return snapshot
+        snapshot = replace(
+            snapshot,
+            native_session_id=str(state.native_session_id),
+            completed_turns=state.completed_turns,
+        )
+        try:
+            history = self._read_history(state, Op.INSPECT)
+        except InteractionFailure:
+            history = []
+        if history:
+            snapshot = replace(
+                snapshot,
+                last_user_message_present=bool(history[-1].user),
+                last_assistant_message_present=bool(history[-1].assistant),
+            )
+        try:
+            transcript = self._transcript(state, Op.INSPECT)
+            if transcript is None:
+                return snapshot
+            # _transcript applies the existing canonical path, UUID, size and
+            # JSONL validation before this allowlisted read.
+            counts, telemetry, tool_names = _debug_transcript_summary(
+                transcript.read_text(encoding="utf-8").splitlines()
+            )
+        except (InteractionFailure, OSError, UnicodeError, ValueError, TypeError):
+            return snapshot
+        return replace(
+            snapshot,
+            transcript_present=True,
+            event_counts=counts,
+            telemetry=telemetry,
+            mcp_tool_names=tool_names,
+        )
+
+    async def debug_snapshot(self, reference: SessionReference) -> SessionDebugSnapshot:
+        return await asyncio.to_thread(self._debug_snapshot_sync, reference)
 
     def _discover_transcript(self, state: _SessionState) -> Path:
         home = self._qwen_home(state.reference).resolve()

@@ -1,9 +1,10 @@
 """Conversation/session port, deliberately separate from runtime lifecycle."""
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from universal_agent_runtime.application.ports.interaction_values import (
     DeleteSessionResult,
+    SessionDebugSnapshot,
     SessionObservation,
     SessionReference,
     TurnRequest,
@@ -33,3 +34,10 @@ class AgentInteraction(Protocol):
     async def delete_session(self, reference: SessionReference) -> DeleteSessionResult:
         """Remove all adapter-owned artifacts for the logical Session."""
         ...
+
+
+@runtime_checkable
+class AgentDebugReader(Protocol):
+    """Optional read-only view of adapter-owned observability data."""
+
+    async def debug_snapshot(self, reference: SessionReference) -> SessionDebugSnapshot: ...

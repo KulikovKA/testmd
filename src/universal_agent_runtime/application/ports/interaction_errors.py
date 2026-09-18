@@ -9,6 +9,7 @@ from universal_agent_runtime.application.ports.interaction_values import (
 
 class InteractionOperation(str, Enum):
     CREATE = "create"
+    INSPECT = "inspect"
     TURN = "turn"
     DELETE = "delete"
 
