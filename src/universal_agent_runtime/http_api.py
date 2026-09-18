@@ -37,11 +37,16 @@ from universal_agent_runtime.application.ports.interaction_errors import (
 from universal_agent_runtime.application.ports.interaction_values import (
     SessionDebugSnapshot,
 )
+from universal_agent_runtime.application.ports.runtime_values import OperationOptions
 from universal_agent_runtime.application.ports.skill_store import (
     MAX_ARCHIVE_BYTES,
     SkillDescriptor,
     SkillInstallRequest,
     SkillStoreFailure,
+)
+from universal_agent_runtime.application.ports.workspace_inventory import (
+    WorkspaceEntry,
+    WorkspaceInventory,
 )
 from universal_agent_runtime.composition import (
     ApplicationComposition,
@@ -327,6 +332,76 @@ class AgentDebugReportResponse(BaseModel):
             ),
             failure=agent.failure,
             conversation_recovery_required=agent.conversation_recovery_required,
+        )
+
+
+class WorkspaceFileResponse(BaseModel):
+    path: str
+    type: Literal["file", "directory"]
+    category: str
+    size_bytes: int | None = None
+
+    @classmethod
+    def from_entry(cls, entry: WorkspaceEntry) -> "WorkspaceFileResponse":
+        return cls(
+            path=entry.path,
+            type=entry.type,
+            category=entry.category,
+            size_bytes=entry.size_bytes,
+        )
+
+
+class WorkspaceFileSummaryResponse(BaseModel):
+    directories: int
+    files: int
+    skills: int
+    transcripts: int
+    mcp_server_present: bool
+
+
+class AgentFilesResponse(BaseModel):
+    agent_id: str
+    state: AgentLifecycleState
+    root: Literal["/workspace"] = "/workspace"
+    available: bool
+    reason: Literal["workspace_not_available"] | None = None
+    files: list[WorkspaceFileResponse]
+    truncated: bool
+    summary: WorkspaceFileSummaryResponse
+
+    @classmethod
+    def from_inventory(
+        cls, record: AgentRecord, inventory: WorkspaceInventory
+    ) -> "AgentFilesResponse":
+        entries = inventory.files
+        skills = {
+            entry.path.split("/")[2]
+            for entry in entries
+            if entry.path.startswith(".agent/skills/")
+            and len(entry.path.split("/")) >= 3
+        }
+        return cls(
+            agent_id=record.agent_id.value,
+            state=record.state,
+            available=inventory.available,
+            reason=None if inventory.available else "workspace_not_available",
+            files=[WorkspaceFileResponse.from_entry(entry) for entry in entries],
+            truncated=inventory.truncated,
+            summary=WorkspaceFileSummaryResponse(
+                directories=sum(entry.type == "directory" for entry in entries),
+                files=sum(entry.type == "file" for entry in entries),
+                skills=len(skills),
+                transcripts=sum(
+                    entry.category == "qwen_transcript"
+                    and entry.type == "file"
+                    and entry.path.endswith(".jsonl")
+                    for entry in entries
+                ),
+                mcp_server_present=any(
+                    entry.path == ".uar-tools/task_rest_mcp_server.mjs"
+                    for entry in entries
+                ),
+            ),
         )
 
 
@@ -696,6 +771,24 @@ def create_application(composition: ApplicationComposition) -> FastAPI:
             else SessionDebugSnapshot()
         )
         return AgentDebugReportResponse.from_observation(record, snapshot)
+
+    @app.get(
+        "/agents/{agent_id}/files",
+        response_model=AgentFilesResponse,
+        responses=lifecycle_errors,
+    )
+    async def agent_files(agent_id: AgentPath) -> AgentFilesResponse:
+        record = lifecycle.inspect(AgentId(agent_id))
+        inventory = (
+            await composition.workspace_reader.workspace_inventory(
+                record.runtime_handle,
+                options=OperationOptions(settings.agent_operation_timeout_seconds),
+            )
+            if composition.workspace_reader is not None
+            and record.runtime_handle is not None
+            else WorkspaceInventory(False)
+        )
+        return AgentFilesResponse.from_inventory(record, inventory)
 
     @app.post(
         "/agents/{agent_id}/start",

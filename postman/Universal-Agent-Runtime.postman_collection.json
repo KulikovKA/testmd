@@ -122,6 +122,13 @@
       }
     },
     {
+      "name": "Agent Internal Files",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/agents/{{agent_id}}/files"
+      }
+    },
+    {
       "name": "Create development Skills Agent (no tools)",
       "request": {
         "method": "POST",

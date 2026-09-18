@@ -1,11 +1,13 @@
 """Docker implementation of the runtime-neutral AgentRuntime lifecycle port."""
 
 import asyncio
+import io
 import re
+import tarfile
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 import docker
@@ -28,7 +30,160 @@ from universal_agent_runtime.application.ports.runtime_values import (
     RuntimeHandle,
     RuntimeObservation,
 )
+from universal_agent_runtime.application.ports.workspace_inventory import (
+    WorkspaceEntry,
+    WorkspaceInventory,
+)
 from universal_agent_runtime.domain.identifiers import AgentId, WorkspaceId
+
+_MAX_INVENTORY_DEPTH = 8
+_MAX_INVENTORY_ENTRIES = 1000
+_MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
+_MAX_RESPONSE_ENTRY_BYTES = 192 * 1024
+_VISIBLE_NAME = re.compile(r"[A-Za-z0-9._-]{1,128}\Z")
+_PRIVATE_NAMES = (
+    ".env",
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "credential",
+    "password",
+    "passwd",
+    "secret",
+    "token",
+)
+
+
+class _BoundedArchiveStream(io.RawIOBase):
+    """Feed tarfile without buffering workspace file bodies in memory."""
+
+    def __init__(self, chunks: Any) -> None:
+        super().__init__()
+        self._chunks = iter(chunks)
+        self._buffer = bytearray()
+        self._received = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def read(self, size: int = -1) -> bytes:
+        if size < 0:
+            size = 64 * 1024
+        while len(self._buffer) < size:
+            try:
+                chunk = next(self._chunks)
+            except StopIteration:
+                break
+            if not isinstance(chunk, bytes):
+                raise TypeError("invalid archive chunk")
+            self._received += len(chunk)
+            if self._received > _MAX_ARCHIVE_BYTES:
+                raise ValueError("workspace archive exceeds limit")
+            self._buffer.extend(chunk)
+        result = bytes(self._buffer[:size])
+        del self._buffer[:size]
+        return result
+
+    def close(self) -> None:
+        close = getattr(self._chunks, "close", None)
+        if callable(close):
+            close()
+        super().close()
+
+
+def _workspace_category(path: str) -> Literal[
+    "skill", "qwen_transcript", "qwen_state", "uar_tool", "workspace"
+]:
+    if path == ".agent/skills" or path.startswith(".agent/skills/"):
+        return "skill"
+    if path.startswith(".qwen-home/"):
+        if path.startswith(".qwen-home/projects/") and "/chats/" in path:
+            return "qwen_transcript"
+        return "qwen_state"
+    if path == ".uar-tools" or path.startswith(".uar-tools/"):
+        return "uar_tool"
+    return "workspace"
+
+
+def _visible_workspace_path(parts: list[str]) -> bool:
+    for part in parts:
+        if _VISIBLE_NAME.fullmatch(part) is None:
+            return False
+        lower = part.lower()
+        if lower == "sfera-ca.pem" and parts == [".uar-tools", "sfera-ca.pem"]:
+            continue
+        if lower.endswith((".pem", ".key")) or any(
+            name in lower for name in _PRIVATE_NAMES
+        ):
+            return False
+    return True
+
+
+def _read_workspace_inventory(container: Any) -> WorkspaceInventory:
+    chunks, _ = container.get_archive("/workspace")
+    stream = _BoundedArchiveStream(chunks)
+    entries: list[WorkspaceEntry] = []
+    symlinks: set[tuple[str, ...]] = set()
+    response_bytes = 0
+    truncated = False
+    try:
+        with tarfile.open(fileobj=stream, mode="r|") as archive:
+            for member in archive:
+                name = member.name.removeprefix("./").rstrip("/")
+                parts = name.split("/")
+                if (
+                    member.name.startswith("/")
+                    or "\\" in name
+                    or "\x00" in name
+                    or any(part in {"", ".", ".."} for part in parts)
+                    or parts[0] != "workspace"
+                ):
+                    raise ValueError("invalid workspace archive path")
+                relative = tuple(parts[1:])
+                if not relative:
+                    continue
+                if any(relative[: len(link)] == link for link in symlinks):
+                    continue
+                if member.issym() or member.islnk():
+                    symlinks.add(relative)
+                    entries = [
+                        entry
+                        for entry in entries
+                        if tuple(entry.path.split("/"))[: len(relative)] != relative
+                    ]
+                    continue
+                if len(relative) > _MAX_INVENTORY_DEPTH:
+                    truncated = True
+                    continue
+                if not (member.isdir() or member.isfile()):
+                    continue
+                if member.size < 0 or member.size > 1_000_000_000_000:
+                    raise ValueError("invalid workspace file size")
+                if not _visible_workspace_path(list(relative)):
+                    continue
+                path = "/".join(relative)
+                entry_bytes = len(path.encode("utf-8")) + 128
+                if (
+                    len(entries) >= _MAX_INVENTORY_ENTRIES
+                    or response_bytes + entry_bytes > _MAX_RESPONSE_ENTRY_BYTES
+                ):
+                    truncated = True
+                    break
+                response_bytes += entry_bytes
+                entries.append(
+                    WorkspaceEntry(
+                        path,
+                        "directory" if member.isdir() else "file",
+                        _workspace_category(path),
+                        None if member.isdir() else member.size,
+                    )
+                )
+    finally:
+        stream.close()
+    return WorkspaceInventory(
+        True, tuple(sorted(entries, key=lambda item: item.path)), truncated
+    )
 
 
 @dataclass(frozen=True)
@@ -478,6 +633,40 @@ class DockerRuntime:
     ) -> RuntimeObservation:
         async with self._operation(Op.STATUS, handle.agent_id, options):
             return await self._observation(self._require(handle, Op.STATUS), Op.STATUS)
+
+    async def workspace_inventory(
+        self, handle: RuntimeHandle, *, options: OperationOptions
+    ) -> WorkspaceInventory:
+        """Read metadata from the owned /workspace archive without executing code."""
+
+        try:
+            async with self._operation(Op.STATUS, handle.agent_id, options):
+                record = self._require(handle, Op.STATUS)
+                workload = self._workloads.get(record.request.workload)
+                if (
+                    not record.complete
+                    or record.cleanup_required
+                    or workload is None
+                    or workload.workspace_target != "/workspace"
+                ):
+                    return WorkspaceInventory(False)
+                container = await self._container(record, Op.STATUS)
+                return await self._docker_call(
+                    Op.STATUS,
+                    handle.agent_id,
+                    _read_workspace_inventory,
+                    container,
+                    handle=handle,
+                )
+        except (
+            RuntimeFailure,
+            OSError,
+            ValueError,
+            TypeError,
+            tarfile.TarError,
+            AttributeError,
+        ):
+            return WorkspaceInventory(False)
 
     async def stop(
         self, handle: RuntimeHandle, *, options: OperationOptions

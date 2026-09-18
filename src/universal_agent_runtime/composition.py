@@ -41,6 +41,9 @@ from universal_agent_runtime.application.ports.runtime_values import (
     ResourceLimits,
     SecretBinding,
 )
+from universal_agent_runtime.application.ports.workspace_inventory import (
+    WorkspaceInventoryReader,
+)
 from universal_agent_runtime.application.skill_management import SkillManagementService
 from universal_agent_runtime.configuration import ApplicationSettings, RuntimeDriver
 
@@ -57,6 +60,7 @@ class ApplicationComposition:
     skills: SkillManagementService | None = None
     skill_catalog: SkillPackageCatalog | None = None
     debug_reader: AgentDebugReader | None = None
+    workspace_reader: WorkspaceInventoryReader | None = None
     package_name: str = "universal_agent_runtime"
 
     async def close(self) -> None:
@@ -132,6 +136,9 @@ def compose_application(
         skills=SkillManagementService(catalog),
         skill_catalog=catalog,
         debug_reader=interaction if isinstance(interaction, AgentDebugReader) else None,
+        workspace_reader=(
+            runtime if isinstance(runtime, WorkspaceInventoryReader) else None
+        ),
     )
 
 
