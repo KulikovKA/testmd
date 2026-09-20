@@ -204,9 +204,14 @@ class AGUIEventResponse(StreamingResponse):
     """SSE response using the official AG-UI event framing."""
 
     def __init__(
-        self, content: AsyncGenerator[bytes, None], *, send_timeout_seconds: float = 30
+        self,
+        content: AsyncGenerator[bytes, None],
+        *,
+        send_timeout_seconds: float = 30,
+        turn: AcceptedTurn | None = None,
     ) -> None:
         self._events = content
+        self._turn = turn
         self._send_timeout_seconds = send_timeout_seconds
         super().__init__(
             content,
@@ -225,6 +230,10 @@ class AGUIEventResponse(StreamingResponse):
         try:
             await super().stream_response(bounded_send)
         finally:
+            # Closing an unstarted async generator does not execute its finally.
+            # Header-send failure must detach even before the first event runs.
+            if self._turn is not None and self._turn.deltas is not None:
+                self._turn.deltas.detach()
             await self._events.aclose()
 
 

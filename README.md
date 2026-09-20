@@ -137,6 +137,17 @@ turn commit. A failed turn ends with `RUN_ERROR`; provisional deltas are not
 saved to history. The legacy `/agents/{id}/messages/stream` endpoint still
 returns only committed content.
 
+Known secrets are redacted before delivery, including secrets split across
+chunks. Only a possible secret prefix is buffered. Safe deltas are combined by
+size (32 characters, with the remaining tail flushed at completion); there is
+no timer-based flush. Concatenated deltas must match the authoritative redacted
+final response. A mismatch ends the run with `RUN_ERROR` without committing
+application conversation history.
+
+Local test results and commands for the separate server at `10.228.64.200` are
+tracked in [SERVER_VERIFICATION.md](SERVER_VERIFICATION.md). Docker/Kata/Qwen/LLM
+server checks remain pending until run on that server.
+
 ```bash
 curl -N -X POST 'http://127.0.0.1:8080/ag-ui/agents/<agent_id>/run' \
   -H 'Content-Type: application/json' \

@@ -34,6 +34,13 @@ from universal_agent_runtime.application.ports.interaction_values import (
     TurnRequest,
     TurnResult,
 )
+from universal_agent_runtime.application.text_stream import (
+    StreamingRedactor as _StreamingRedactor,
+)
+from universal_agent_runtime.application.text_stream import (
+    TextDeltaCoalescer,
+    redact_text,
+)
 from universal_agent_runtime.benchmarking import emit_benchmark_metric
 from universal_agent_runtime.domain.identifiers import validate_identifier
 
@@ -574,10 +581,10 @@ def _parse_qwen_output(output: str, expected: UUID) -> QwenExecution:
 def _parse_qwen_result(final: dict[str, Any], expected: UUID) -> QwenExecution:
     try:
         actual = UUID(str(final["session_id"]))
-        response = str(final["result"])
+        response = final["result"]
     except (KeyError, TypeError, ValueError):
         raise QwenRunnerFailure(QwenRunnerErrorCode.PROTOCOL_FAILURE) from None
-    if actual != expected or not response.strip():
+    if actual != expected or not isinstance(response, str) or not response.strip():
         raise QwenRunnerFailure(QwenRunnerErrorCode.PROTOCOL_FAILURE)
     if response.lstrip().startswith("[API Error:"):
         raise QwenRunnerFailure(QwenRunnerErrorCode.INFERENCE_UNAVAILABLE)
@@ -695,37 +702,9 @@ class QwenJSONLStream:
         if self.final is None or self.final.get("subtype") != "success":
             raise QwenRunnerFailure(QwenRunnerErrorCode.PROTOCOL_FAILURE)
         execution = _parse_qwen_result(self.final, self.expected)
-        if self.on_delta is not None and self.text and self.text != execution.response:
+        if self.text and self.text != execution.response:
             raise QwenRunnerFailure(QwenRunnerErrorCode.PROTOCOL_FAILURE)
         return execution
-
-
-class _StreamingRedactor:
-    """Retain enough raw suffix to catch known secrets split across deltas."""
-
-    def __init__(self, secrets: tuple[str, ...], emit: Callable[[str], None]) -> None:
-        self._secrets = tuple(sorted(secrets, key=len, reverse=True))
-        self._hold = max((len(secret) - 1 for secret in secrets), default=0)
-        self._emit = emit
-        self._pending = ""
-        self.emitted = ""
-
-    def push(self, text: str) -> None:
-        self._pending += text
-        for secret in self._secrets:
-            self._pending = self._pending.replace(secret, "[REDACTED]")
-        if len(self._pending) > self._hold:
-            self._send(self._pending[: len(self._pending) - self._hold])
-            self._pending = self._pending[len(self._pending) - self._hold :]
-
-    def finish(self) -> None:
-        self._send(self._pending)
-        self._pending = ""
-
-    def _send(self, text: str) -> None:
-        if text:
-            self.emitted += text
-            self._emit(text)
 
 
 def _extract_mcp_metrics(output: str) -> tuple[str, tuple[dict[str, Any], ...]]:
@@ -1324,19 +1303,21 @@ class QwenSessionAdapter:
                     f"{state.native_session_id}:{state.completed_turns + 1}"
                 ),
             )
+            coalescer = TextDeltaCoalescer(on_delta) if on_delta is not None else None
             redactor = (
-                _StreamingRedactor(self._secret_values(), on_delta)
-                if on_delta
+                _StreamingRedactor(self._secret_values(), coalescer.push)
+                if coalescer is not None
                 else None
             )
             run_stream = getattr(self._runner, "run_stream", None)
-            if redactor is not None and callable(run_stream):
+            if redactor is not None and coalescer is not None and callable(run_stream):
                 execution = run_stream(invocation, redactor.push)
                 redactor.finish()
                 if redactor.emitted and redactor.emitted != self._redact(
                     execution.response
                 ):
                     raise QwenRunnerFailure(QwenRunnerErrorCode.PROTOCOL_FAILURE)
+                coalescer.finish()
             else:
                 execution = self._runner.run(invocation)
         except QwenRunnerFailure as error:
@@ -1419,8 +1400,10 @@ class QwenSessionAdapter:
             # Remove known injected credentials from persisted native messages.
             for transcript in self._qwen_home(request.session).rglob("*.jsonl"):
                 text = transcript.read_text(encoding="utf-8")
-                for secret in self._secret_values():
-                    text = text.replace(json.dumps(secret)[1:-1], "[REDACTED]")
+                text = redact_text(
+                    text,
+                    tuple(json.dumps(secret)[1:-1] for secret in self._secret_values()),
+                )
                 self._atomic_write(transcript, text)
             shutil.rmtree(backup)
             marker.unlink()
@@ -1443,7 +1426,10 @@ class QwenSessionAdapter:
             await on_delta(AssistantTextDelta(text))
 
         def emit(text: str) -> None:
-            asyncio.run_coroutine_threadsafe(forward(text), loop).result()
+            try:
+                asyncio.run_coroutine_threadsafe(forward(text), loop).result()
+            except Exception:  # noqa: BLE001 - final flush must also preserve rollback
+                raise QwenRunnerFailure(QwenRunnerErrorCode.OPERATION_FAILED) from None
 
         return await asyncio.to_thread(self._turn_sync, request, emit)
 
@@ -1459,9 +1445,7 @@ class QwenSessionAdapter:
         )
 
     def _redact(self, value: str) -> str:
-        for secret in self._secret_values():
-            value = value.replace(secret, "[REDACTED]")
-        return value
+        return redact_text(value, self._secret_values())
 
     def _delete_sync(self, reference: SessionReference) -> DeleteSessionResult:
         agent_directory = self._agent_directory(reference)

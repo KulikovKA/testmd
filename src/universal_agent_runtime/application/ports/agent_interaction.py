@@ -49,7 +49,12 @@ class AgentDebugReader(Protocol):
 
 @runtime_checkable
 class StreamingAgentInteraction(Protocol):
-    """Optional semantic text stream; final TurnResult still owns the commit."""
+    """Optional provisional text stream; final TurnResult still owns the commit.
+
+    Emit only new, secret-redacted assistant text. Concatenated non-empty deltas
+    must equal the final redacted response; a mismatch is a protocol failure.
+    Adapters without partial output may return only the authoritative result.
+    """
 
     async def turn_stream(
         self,

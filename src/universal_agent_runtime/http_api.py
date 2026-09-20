@@ -884,7 +884,7 @@ def create_application(composition: ApplicationComposition) -> FastAPI:
         response_class=AGUIEventResponse,
         responses={
             200: {
-                "description": "AG-UI SSE run lifecycle. The response is buffered until the existing Agent turn commits.",
+                "description": "AG-UI SSE with provisional assistant text deltas; TEXT_MESSAGE_END and RUN_FINISHED follow a successful turn commit.",
                 "content": {"text/event-stream": {"schema": {"type": "string"}}},
             }
         },
@@ -943,6 +943,7 @@ def create_application(composition: ApplicationComposition) -> FastAPI:
                 heartbeat_seconds=settings.stream_heartbeat_seconds,
             ),
             send_timeout_seconds=settings.stream_send_timeout_seconds,
+            turn=turn,
         )
 
     return app

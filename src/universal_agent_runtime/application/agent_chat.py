@@ -1,4 +1,4 @@
-"""Bounded non-streaming turns with process-local, per-Agent coordination."""
+"""Owned turns and bounded provisional deltas with per-Agent coordination."""
 
 import asyncio
 import time
@@ -25,11 +25,13 @@ from universal_agent_runtime.application.ports.agent_repository import AgentRepo
 from universal_agent_runtime.application.ports.interaction_errors import (
     InteractionErrorCode,
     InteractionFailure,
+    InteractionOperation,
 )
 from universal_agent_runtime.application.ports.interaction_values import (
     AssistantTextDelta,
     TurnRequest,
 )
+from universal_agent_runtime.application.text_stream import redact_text
 from universal_agent_runtime.benchmarking import emit_benchmark_metric
 from universal_agent_runtime.domain.agent import AgentLifecycleState as State
 from universal_agent_runtime.domain.identifiers import AgentId
@@ -122,10 +124,7 @@ class AgentChatService:
         return record
 
     def _redact(self, content: str) -> str:
-        for value in sorted(self._configuration.redacted_values, key=len, reverse=True):
-            if value:
-                content = content.replace(value, "[REDACTED]")
-        return content
+        return redact_text(content, self._configuration.redacted_values)
 
     def history(
         self, agent_id: AgentId, *, after: int = 0, limit: int | None = None
@@ -235,6 +234,27 @@ class AgentChatService:
             if self._configuration.benchmark_timing_enabled
             else 0
         )
+        streamed = ""
+
+        async def forward(delta: AssistantTextDelta) -> None:
+            nonlocal streamed
+            if (
+                not isinstance(delta.text, str)
+                or "\x00" in delta.text
+                or len(streamed) + len(delta.text)
+                > self._configuration.max_response_characters
+            ):
+                raise InteractionFailure(
+                    InteractionOperation.TURN,
+                    request.session,
+                    InteractionErrorCode.PROTOCOL_FAILURE,
+                )
+            if not delta.text:
+                return
+            streamed += delta.text
+            assert deltas is not None
+            await deltas.emit(delta)
+
         try:
             interaction_started_ns = (
                 time.perf_counter_ns()
@@ -245,7 +265,7 @@ class AgentChatService:
                 if deltas is not None and isinstance(
                     self._interaction, StreamingAgentInteraction
                 ):
-                    result = await self._interaction.turn_stream(request, deltas.emit)
+                    result = await self._interaction.turn_stream(request, forward)
                 else:
                     result = await self._interaction.turn(request)
             finally:
@@ -269,6 +289,13 @@ class AgentChatService:
                 or "\x00" in result.response
             ):
                 raise self._fail(record, Code.INTERACTION_FAILED, recoverable=False)
+            if streamed and streamed != self._redact(result.response):
+                raise self._fail(
+                    record,
+                    Code.INTERACTION_FAILED,
+                    recoverable=False,
+                    interaction_code=InteractionErrorCode.PROTOCOL_FAILURE,
+                )
             messages = (
                 Message(
                     uuid4().hex,
