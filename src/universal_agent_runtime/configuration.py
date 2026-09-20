@@ -177,6 +177,8 @@ class ApplicationSettings:
     qwen_request_timeout_seconds: int = 600
     qwen_wall_time_seconds: int = 900
     benchmark_timing_enabled: bool = False
+    java_development_enabled: bool = False
+    repository_allowed_hosts: tuple[str, ...] = ()
     sfera_base_url: str | None = None
     sfera_username_secret_id: str | None = None
     sfera_username: str | None = field(default=None, repr=False)
@@ -194,6 +196,18 @@ class ApplicationSettings:
     stream_send_timeout_seconds: float = 10.0
 
     def __post_init__(self) -> None:
+        if type(self.java_development_enabled) is not bool:
+            raise ConfigurationError(
+                "UAR_JAVA_DEVELOPMENT_ENABLED must be true or false"
+            )
+        if not isinstance(self.repository_allowed_hosts, tuple) or any(
+            not isinstance(host, str)
+            or re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,252}", host) is None
+            for host in self.repository_allowed_hosts
+        ):
+            raise ConfigurationError(
+                "UAR_REPOSITORY_ALLOWED_HOSTS requires explicit lowercase hosts"
+            )
         if self.skill_registry_root is not None and (
             not self.skill_registry_root.is_absolute()
             or self.skill_registry_root == Path(self.skill_registry_root.anchor)
@@ -394,6 +408,12 @@ class ApplicationSettings:
                 "UAR_QWEN_WALL_TIME_SECONDS",
             ),
             benchmark_timing_enabled=_boolean(values, "UAR_BENCHMARK_TIMING_ENABLED"),
+            java_development_enabled=_boolean(values, "UAR_JAVA_DEVELOPMENT_ENABLED"),
+            repository_allowed_hosts=tuple(
+                host.strip().lower()
+                for host in values.get("UAR_REPOSITORY_ALLOWED_HOSTS", "").split(",")
+                if host.strip()
+            ),
             sfera_base_url=_optional_sfera_endpoint(values),
             sfera_username_secret_id=sfera_username_secret_id or None,
             sfera_username=sfera_username or None,

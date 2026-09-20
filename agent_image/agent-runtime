@@ -12,7 +12,8 @@ fail() {
 }
 
 prepare_workspace() {
-    mkdir -p "$workspace" "$qwen_home" "$skills_dir" "$tools_dir"
+    mkdir -p "$workspace" "$qwen_home" "$skills_dir" "$tools_dir" \
+        "$workspace/projects" "$workspace/.m2" "$workspace/.gradle"
     test -w "$workspace" || fail "workspace is not writable"
     test -w "$qwen_home" || fail "Qwen home is not writable"
     test -d "$skills_dir" || fail "skills directory is unavailable"
@@ -109,6 +110,14 @@ case "${1:-serve}" in
         test "$#" -eq 0 || fail "readiness accepts no arguments"
         prepare_workspace
         command -v qwen >/dev/null 2>&1 || fail "Qwen Code is unavailable"
+        for tool in java javac git mvn gradle bash curl unzip node; do
+            command -v "$tool" >/dev/null 2>&1 || fail "development capability is unavailable"
+        done
+        ;;
+    capabilities)
+        shift
+        test "$#" -eq 0 || fail "capabilities accepts no arguments"
+        exec node /usr/local/lib/uar/capabilities.mjs
         ;;
     turn)
         shift
@@ -120,6 +129,6 @@ case "${1:-serve}" in
         printf '%s\n' 'agent-runtime qwen-code=0.23.1'
         ;;
     *)
-        fail "expected serve, readiness, turn, or version"
+        fail "expected serve, readiness, capabilities, turn, or version"
         ;;
 esac

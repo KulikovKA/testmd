@@ -53,6 +53,7 @@ from universal_agent_runtime.composition import (
     compose_application,
 )
 from universal_agent_runtime.configuration import ApplicationSettings
+from universal_agent_runtime.development_http import register_development_routes
 from universal_agent_runtime.domain.agent import AgentLifecycleState
 from universal_agent_runtime.domain.identifiers import AgentId
 from universal_agent_runtime.domain.message import Message
@@ -946,6 +947,7 @@ def create_application(composition: ApplicationComposition) -> FastAPI:
             turn=turn,
         )
 
+    register_development_routes(app, composition.development, settings)
     return app
 
 

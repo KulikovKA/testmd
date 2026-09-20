@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from universal_agent_runtime.adapters.docker_agent_qwen import DockerAgentQwenRunner
+from universal_agent_runtime.adapters.docker_development_workspace import (
+    DockerDevelopmentWorkspaceAdapter,
+)
 from universal_agent_runtime.adapters.docker_runtime import (
     DockerRuntime,
     DockerWorkload,
@@ -15,9 +18,19 @@ from universal_agent_runtime.adapters.filesystem_skill_registry import (
 from universal_agent_runtime.adapters.in_memory_agent_repository import (
     InMemoryAgentRepository,
 )
+from universal_agent_runtime.adapters.in_memory_development_tasks import (
+    InMemoryDevelopmentTaskRepository,
+)
 from universal_agent_runtime.adapters.qwen_session import (
     QwenSessionAdapter,
     QwenSessionConfig,
+)
+from universal_agent_runtime.adapters.repository_access import (
+    ConfiguredSecretPolicy,
+    PublicRepositoryCredentialAdapter,
+)
+from universal_agent_runtime.adapters.sfera_code_repository import (
+    SferaCodeRepositoryAdapter,
 )
 from universal_agent_runtime.adapters.skill_packages import SkillPackageCatalog
 from universal_agent_runtime.application.agent_chat import (
@@ -28,12 +41,23 @@ from universal_agent_runtime.application.agent_lifecycle import (
     AgentLifecycleService,
     LifecycleConfiguration,
 )
+from universal_agent_runtime.application.development_tasks import DevelopmentTaskService
+from universal_agent_runtime.application.development_workflow import DevelopmentWorkflow
 from universal_agent_runtime.application.ports.agent_interaction import (
     AgentDebugReader,
     AgentInteraction,
 )
 from universal_agent_runtime.application.ports.agent_repository import AgentRepository
 from universal_agent_runtime.application.ports.agent_runtime import AgentRuntime
+from universal_agent_runtime.application.ports.development_workspace import (
+    DevelopmentWorkspacePort,
+)
+from universal_agent_runtime.application.ports.repository_credentials import (
+    RepositoryCredentialPort,
+)
+from universal_agent_runtime.application.ports.repository_platform import (
+    RepositoryPlatformPort,
+)
 from universal_agent_runtime.application.ports.runtime_values import (
     EnvironmentVariable,
     NetworkDestination,
@@ -61,15 +85,19 @@ class ApplicationComposition:
     skill_catalog: SkillPackageCatalog | None = None
     debug_reader: AgentDebugReader | None = None
     workspace_reader: WorkspaceInventoryReader | None = None
+    development: DevelopmentWorkflow | None = None
+    development_workspace: DevelopmentWorkspacePort | None = None
     package_name: str = "universal_agent_runtime"
 
     async def close(self) -> None:
         """Close owned adapters once the application lifespan ends."""
 
         closed: set[int] = set()
+        if self.development is not None:
+            await self.development.close()
         if self.chat is not None:
             await self.chat.close()
-        for dependency in (self.interaction, self.runtime):
+        for dependency in (self.development_workspace, self.interaction, self.runtime):
             if dependency is None or id(dependency) in closed:
                 continue
             closed.add(id(dependency))
@@ -91,13 +119,17 @@ def compose_application(
     runtime: AgentRuntime | None = None,
     interaction: AgentInteraction | None = None,
     repository: AgentRepository | None = None,
+    development_workspace: DevelopmentWorkspacePort | None = None,
+    repository_platform: RepositoryPlatformPort | None = None,
+    repository_credentials: RepositoryCredentialPort | None = None,
 ) -> ApplicationComposition:
     """Select deployment adapters at the composition root or accept explicit fakes."""
 
     if runtime is None:
         runtime = _compose_runtime(settings)
     registry_root = (
-        settings.skill_registry_root or settings.qwen_storage_root.resolve().parent / "skills"
+        settings.skill_registry_root
+        or settings.qwen_storage_root.resolve().parent / "skills"
     )
     catalog = SkillPackageCatalog.builtins().with_registry(
         FilesystemSkillRegistry(registry_root)
@@ -127,6 +159,38 @@ def compose_application(
             benchmark_timing_enabled=settings.benchmark_timing_enabled,
         ),
     )
+    development = None
+    if settings.java_development_enabled or development_workspace is not None:
+        secrets = ConfiguredSecretPolicy(
+            tuple(
+                value
+                for value in (
+                    settings.qwen_api_key,
+                    settings.sfera_username,
+                    settings.sfera_password,
+                )
+                if value
+            )
+        )
+        if development_workspace is None:
+            import docker
+
+            development_workspace = DockerDevelopmentWorkspaceAdapter(
+                docker.from_env(timeout=150),
+                secrets,
+                workspace=settings.docker_workspace_target,
+                user=settings.docker_user,
+                allowed_hosts=settings.repository_allowed_hosts,
+            )
+        development = DevelopmentWorkflow(
+            DevelopmentTaskService(InMemoryDevelopmentTaskRepository(), repository),
+            chat,
+            development_workspace,
+            repository_platform or SferaCodeRepositoryAdapter(),
+            repository_credentials
+            or PublicRepositoryCredentialAdapter(settings.repository_allowed_hosts),
+            secrets,
+        )
     return ApplicationComposition(
         settings,
         runtime,
@@ -135,6 +199,8 @@ def compose_application(
         chat,
         skills=SkillManagementService(catalog),
         skill_catalog=catalog,
+        development=development,
+        development_workspace=development_workspace,
         debug_reader=interaction if isinstance(interaction, AgentDebugReader) else None,
         workspace_reader=(
             runtime if isinstance(runtime, WorkspaceInventoryReader) else None

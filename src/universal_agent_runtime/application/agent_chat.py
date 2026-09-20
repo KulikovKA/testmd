@@ -150,10 +150,19 @@ class AgentChatService:
         return await asyncio.shield(turn.task)
 
     def begin(
-        self, agent_id: AgentId, content: str, *, stream: bool = False
+        self,
+        agent_id: AgentId,
+        content: str,
+        *,
+        stream: bool = False,
+        development_task_id: str | None = None,
     ) -> AcceptedTurn:
         """Validate and reserve before HTTP headers; never await or queue a turn."""
         record = self._require(agent_id, Op.MESSAGE)
+        if record.development_task_id != development_task_id:
+            raise AgentLifecycleFailure(
+                Op.MESSAGE, Code.CONFLICT, agent_id=agent_id, state=record.state
+            )
         if record.state is not State.READY or record.conversation_recovery_required:
             raise AgentLifecycleFailure(
                 Op.MESSAGE, Code.INVALID_STATE, agent_id=agent_id, state=record.state

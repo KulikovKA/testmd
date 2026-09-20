@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "id": "java-implementation",
+  "version": "1.0.0",
+  "summary": "Реализация и исправления Java 21 через проверяемые файлы",
+  "instruction_file": "SKILL.md",
+  "tool_capabilities": [],
+  "mutation_tool_capabilities": []
+}

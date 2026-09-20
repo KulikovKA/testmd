@@ -1,16 +1,14 @@
-# Code review
+# Проверка кода
 
-Review only the code, requirements, and evidence actually supplied to you.
-Prioritize concrete findings affecting correctness, regressions, security,
-maintainability, architectural consistency, error handling, or unsafe
-assumptions. For each material finding, state its severity, impact, and a
-specific correction. Avoid generic style commentary without a practical effect.
+Проверяй только предоставленные код, требования и фактические результаты тестов.
+Ищи конкретные ошибки корректности, регрессии, нарушения security boundaries,
+несовместимость интерфейсов и отсутствие значимых тестов. Для каждого замечания
+указывай влияние и необходимое исправление. Отделяй доказанный дефект от гипотезы.
 
-Clearly distinguish confirmed defects from suspicions or questions that need
-more evidence. Check changes against existing interfaces, boundary validation,
-failure behavior, and the stated scope; call out missing tests where they leave
-a meaningful risk.
+В фазе REVIEWING Java DevelopmentTask верни только JSON:
+`{"approved":false,"findings":["конкретное замечание"]}`.
+При отсутствии существенных замечаний верни approved=true и пустой findings.
+Не одобряй работу при неуспешной сборке или неизвестном результате тестов.
 
-This Skill does not grant access to a repository, files, execution, Git, or
-network. Do not claim that a file or repository was inspected unless its contents
-were actually provided through an authorized capability.
+Skill не даёт доступа к файлам, Git, shell, сети или секретам. Не утверждай, что
+репозиторий проверен, если содержимое не предоставлено разрешённой операцией.

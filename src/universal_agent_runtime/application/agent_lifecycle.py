@@ -177,8 +177,11 @@ class AgentRecord:
     failure: AgentFailure | None = None
     messages: tuple[Message, ...] = ()
     conversation_recovery_required: bool = False
+    development_task_id: str | None = None
 
     def __post_init__(self) -> None:
+        if self.development_task_id is not None:
+            validate_identifier(self.development_task_id)
         if self.session.agent_id != self.agent_id:
             raise ValueError("Session must belong to the Agent")
         if self.runtime_request.agent_id != self.agent_id:
@@ -545,6 +548,13 @@ class AgentLifecycleService:
     async def stop(self, agent_id: AgentId) -> AgentRecord:
         async with self._lock(agent_id):
             record = self._require(agent_id, AgentLifecycleOperation.STOP)
+            if record.development_task_id is not None:
+                raise AgentLifecycleFailure(
+                    AgentLifecycleOperation.STOP,
+                    AgentLifecycleErrorCode.CONFLICT,
+                    agent_id=agent_id,
+                    state=record.state,
+                )
             if record.state is AgentLifecycleState.STOPPED:
                 return record
             if record.state not in {
@@ -595,6 +605,13 @@ class AgentLifecycleService:
     async def delete(self, agent_id: AgentId) -> DeleteAgentResult:
         async with self._lock(agent_id):
             record = self._repository.get(agent_id)
+            if record is not None and record.development_task_id is not None:
+                raise AgentLifecycleFailure(
+                    AgentLifecycleOperation.DELETE,
+                    AgentLifecycleErrorCode.CONFLICT,
+                    agent_id=agent_id,
+                    state=record.state,
+                )
             if record is None:
                 if self._repository.was_deleted(agent_id):
                     return DeleteAgentResult(agent_id, True)

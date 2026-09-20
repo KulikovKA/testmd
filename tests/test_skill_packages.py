@@ -32,6 +32,11 @@ class SkillPackageTests(unittest.TestCase):
                 "code-review",
                 "code-testing",
                 "decomposition-2",
+                "development-planning",
+                "java-implementation",
+                "java-project-setup",
+                "java-testing",
+                "requirements-clarification",
                 "task-decomposition",
             ),
         )
@@ -46,6 +51,11 @@ class SkillPackageTests(unittest.TestCase):
             "code-implementation",
             "code-testing",
             "code-review",
+            "requirements-clarification",
+            "development-planning",
+            "java-project-setup",
+            "java-implementation",
+            "java-testing",
         )
 
         resolved = catalog.resolve(selected, ())
