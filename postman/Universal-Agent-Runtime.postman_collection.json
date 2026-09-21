@@ -116,6 +116,31 @@
       }
     },
     {
+      "name": "Stop Agent",
+      "request": {
+        "method": "POST",
+        "url": "{{base_url}}/agents/{{agent_id}}/stop"
+      }
+    },
+    {
+      "name": "Delete Agent",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Delete Agent returns 204', function () { pm.response.to.have.status(204); });"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "DELETE",
+        "header": [],
+        "url": "{{base_url}}/agents/{{agent_id}}"
+      }
+    },
+    {
       "name": "Agent Debug Report",
       "request": {
         "method": "GET",
