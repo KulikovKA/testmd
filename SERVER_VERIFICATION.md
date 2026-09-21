@@ -1,5 +1,167 @@
 # Проверки на сервере
 
+## Проверка 11. Existing repository / trusted Git (текущий этап)
+
+**SERVER_VERIFICATION_REQUIRED**. Локально проверены ports, Docker doubles,
+HTTP/AG-UI, native bare Git и JDK 17 fixture; реальный SSH endpoint, host keys,
+Docker volume/Kata pause, helper image и Qwen доступны только на 10.228.64.200.
+Изменены: `trusted_git.py`, `docker_trusted_git.py`, `trusted_git_helper.py`,
+`git_helper/Dockerfile*`, workflow/domain/HTTP/config/composition,
+`agent_image/workspace-operations.mjs`, Postman и тесты.
+
+- `LOCAL_VERIFIED`: targeted 44 passed; full Python 147 passed (2 existing
+  warnings, no skips); Node 75 passed; Ruff, diff/secret-pattern scan и синтаксис
+  Bash/Python команд ниже проверены. Native Git и JDK 17 fixtures выполнены.
+- `LOCAL_NOT_AVAILABLE`: Java 21, Maven, Gradle; системное ПО не устанавливалось.
+- `SERVER_VERIFICATION_REQUIRED`: все проверки 11a–11c, включая настоящий image,
+  Kata pause/resume, SSH/Sfera transport, host pinning и Java/Qwen E2E.
+
+### 11a. Доставка и отдельный helper image
+
+Оператор: завершить активные задачи и штатно остановить подтверждённый процесс
+Orchestrator перед перезапуском (см. проверку 1). Команды не меняют `.env` и
+сохраняют серверный `.dockerignore`; при конфликте merge остановиться, не делать
+reset/restore/checkout файла. Выполнять в Bash:
+
+```bash
+cd ~/universal-agent-runtime-sd2
+cp -p agent_image/.dockerignore "/tmp/uar-agent-dockerignore-$(date +%s)"
+git fetch origin server-deploy-2
+git merge --ff-only origin/server-deploy-2
+grep -Fx '!capabilities.mjs' agent_image/.dockerignore
+grep -Fx '!workspace-operations.mjs' agent_image/.dockerignore
+docker build -f git_helper/Dockerfile -t uar-git-helper:local .
+docker build -t uar-agent:java21-sd2 agent_image
+set -a
+. ./.env
+set +a
+export UAR_GIT_SSH_PRIVATE_KEY_FILE="$HOME/.ssh/uar_sfera_code_ed25519"
+export UAR_GIT_SSH_KNOWN_HOSTS_FILE="$HOME/.ssh/known_hosts"
+export UAR_GIT_SSH_ALLOWED_ENDPOINTS=10.228.84.126:30022
+export UAR_GIT_HELPER_IMAGE=uar-git-helper:local
+export UAR_GIT_AUTHOR_NAME='Admin Sferovich'
+export UAR_GIT_AUTHOR_EMAIL=foo@mail.sfera-t1.ru
+export UAR_DOCKER_WORKLOAD_IMAGE=uar-agent:java21-sd2
+export UAR_JAVA_DEVELOPMENT_ENABLED=true
+test -r "$UAR_GIT_SSH_PRIVATE_KEY_FILE"
+test -s "$UAR_GIT_SSH_KNOWN_HOSTS_FILE"
+nohup bash ./run-orchestrator.sh > /tmp/uar-orchestrator-sd2.log 2>&1 &
+curl --fail --silent --show-error http://127.0.0.1:8080/readyz
+```
+
+`known_hosts` должен уже содержать независимо проверенный host key для
+`[10.228.84.126]:30022`. Не принимать автоматически результат ssh-keyscan.
+Ключ не читать/не выводить; private key расположен вне workspace.
+Expected: API ready, runtime_driver=kata; оба образа собраны; локальный diff
+`.dockerignore` сохранён. Helper build context включает только пять Python-файлов.
+Actual: PENDING SERVER VERIFICATION
+
+### 11b. Реальный workflow, SHA, trace и credential boundary
+
+Запуск создаёт только рабочую ветку `uar/<task-id>` в существующем тестовом repo.
+```bash
+export BASE_URL=http://127.0.0.1:8080
+export PYTHON="$PWD/.venv/bin/python"
+export AGENT_ID=$(curl -fsS "$BASE_URL/agents" -H 'Content-Type: application/json' \
+  -d '{"request_id":"existing-repo-check","skills":["requirements-clarification","development-planning","java-project-setup","java-implementation","java-testing","code-review"],"tools":[]}' \
+  | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["agent_id"])')
+curl -fsS -X POST "$BASE_URL/agents/$AGENT_ID/start"
+export TASK_ID=$(curl -fsS "$BASE_URL/agents/$AGENT_ID/development-tasks" \
+  -H 'Content-Type: application/json' \
+  -d '{"specification":"Add a Java 21 Maven Calculator.add(int,int) library with JUnit 5 tests for positive, negative and zero inputs. Preserve existing repository files. Add .gitignore for target. No external services.","build_system":"maven","repository_url":"ssh://git@10.228.84.126:30022/test/test.git","base_branch":"master","publish":true,"max_fix_attempts":2}' \
+  | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["task_id"])')
+curl -fNsS "$BASE_URL/ag-ui/development-tasks/$TASK_ID/run" \
+  -H 'Content-Type: application/json' -d '{"threadId":"trusted-git","runId":"server-check"}' \
+  > /tmp/uar-existing-repo-events.sse
+curl -fsS "$BASE_URL/development-tasks/$TASK_ID" > /tmp/uar-existing-repo-result.json
+curl -fsS "$BASE_URL/development-tasks/$TASK_ID/trace" > /tmp/uar-existing-repo-trace.json
+curl -fsS "$BASE_URL/agents/$AGENT_ID/llm-turns?limit=10" > /tmp/uar-existing-repo-turns.json
+"$PYTHON" - <<'PY'
+import json, os, pathlib, subprocess, docker
+result = json.loads(pathlib.Path('/tmp/uar-existing-repo-result.json').read_text())
+assert result['state'] == 'COMPLETED', (result['state'], result['failure_code'])
+r = result['result']
+assert r['published'] and r['base_branch'] == 'master'
+assert r['working_branch'] == 'uar/' + os.environ['TASK_ID']
+assert r['execution_backend'] == 'agent'
+events = [json.loads(line[6:]) for line in pathlib.Path('/tmp/uar-existing-repo-events.sse').read_text().splitlines() if line.startswith('data: ')]
+assert events[-1]['type'] == 'RUN_FINISHED'
+assert {'STEP_STARTED', 'STEP_FINISHED', 'CUSTOM', 'TEXT_MESSAGE_CONTENT'} <= {e['type'] for e in events}
+trace = json.loads(pathlib.Path('/tmp/uar-existing-repo-trace.json').read_text())
+assert {'repository_clone_finished','branch_created','git_commit','repository_push_finished'} <= {e['type'] for e in trace['events']}
+for filename in ('result.json','trace.json','turns.json','events.sse'):
+    text = pathlib.Path('/tmp/uar-existing-repo-' + filename).read_text()
+    assert os.environ['UAR_GIT_SSH_PRIVATE_KEY_FILE'] not in text
+    assert 'BEGIN OPENSSH PRIVATE KEY' not in text and 'GIT_SSH_COMMAND' not in text
+client = docker.from_env()
+assert not client.containers.list(all=True, filters={'label':'io.universal-agent-runtime.git-helper=true'})
+agent = client.containers.list(filters={'label':'io.universal-agent-runtime.agent=' + os.environ['AGENT_ID']})[0]
+assert not agent.attrs['State']['Paused']
+assert all(m['Source'] != os.environ['UAR_GIT_SSH_PRIVATE_KEY_FILE'] for m in agent.attrs['Mounts'])
+assert not any(v.startswith('UAR_GIT_SSH_') or v.startswith('SSH_AUTH_SOCK=') for v in agent.attrs['Config']['Env'])
+# Independent read-only remote SHA check; no key contents read by Python.
+import shlex
+ssh = ['ssh','-F','/dev/null','-i',os.environ['UAR_GIT_SSH_PRIVATE_KEY_FILE'],
+       '-o','IdentitiesOnly=yes','-o','IdentityAgent=none','-o','BatchMode=yes',
+       '-o','StrictHostKeyChecking=yes','-o','UserKnownHostsFile='+os.environ['UAR_GIT_SSH_KNOWN_HOSTS_FILE'],
+       '-o','GlobalKnownHostsFile=/dev/null','-o','ForwardAgent=no']
+env = {**os.environ, 'GIT_SSH_COMMAND': shlex.join(ssh), 'GIT_TERMINAL_PROMPT':'0'}
+check = subprocess.run(['git','ls-remote','--',r['repository_url'],'refs/heads/'+r['working_branch']], env=env, capture_output=True, text=True, timeout=30)
+assert check.returncode == 0, 'remote verification failed (raw stderr suppressed)'
+assert check.stdout.split()[0] == r['commit_id']
+print('remote SHA == local SHA; helper removed; Agent boundary verified')
+PY
+```
+
+Expected: настоящий Maven test/package, review, commit, published=true, remote SHA
+совпадает; incremental STEP/CUSTOM до конечного текста; private key/mount paths
+отсутствуют в Agent env/mounts и публичных данных. Если возникли clarification
+или build/network ошибки — записать фактический результат, не считать E2E успешным.
+Actual: PENDING SERVER VERIFICATION
+
+### 11c. Fail-closed host verification и helper cleanup
+
+На READY Agent без активной задачи выполнить только clone с пустым временным
+known_hosts (remote не изменяется). Настоящий known_hosts и ключ не меняются.
+```bash
+"$PYTHON" - <<'PY'
+import asyncio, os, tempfile, docker
+from universal_agent_runtime.adapters.docker_trusted_git import DockerTrustedGitAdapter, TrustedGitSettings
+from universal_agent_runtime.application.ports.trusted_git import GitRequest
+from universal_agent_runtime.domain.development_task import DevelopmentFailure
+from universal_agent_runtime.domain.identifiers import AgentId
+async def check():
+    with tempfile.NamedTemporaryFile() as empty_hosts:
+        client = docker.from_env(timeout=310)
+        adapter = DockerTrustedGitAdapter(client, TrustedGitSettings(
+            os.environ['UAR_GIT_SSH_PRIVATE_KEY_FILE'], empty_hosts.name,
+            ('10.228.84.126:30022',), 'uar-git-helper:local'))
+        try:
+            await adapter.clone(AgentId(os.environ['AGENT_ID']), GitRequest(
+                'verify-host-key','ssh://git@10.228.84.126:30022/test/test.git','master','uar/verify-host-key'))
+        except DevelopmentFailure as error:
+            assert error.code == 'repository_unavailable', error.code
+        else:
+            raise AssertionError('unknown host key unexpectedly accepted')
+        assert not client.containers.list(all=True, filters={'label':'io.universal-agent-runtime.git-helper=true'})
+        agent = client.containers.list(filters={'label':'io.universal-agent-runtime.agent='+os.environ['AGENT_ID']})[0]
+        assert not agent.attrs['State']['Paused']
+        adapter.close()
+        print('unknown host rejected; helper removed; Agent resumed')
+asyncio.run(check())
+PY
+```
+
+Expected: repository_unavailable, helper удалён, Agent возобновлён. Для отмены
+задачи во время настоящего clone/push отправить в другом shell:
+`curl -fsS -X POST "$BASE_URL/development-tasks/$TASK_ID/cancel"` и дождаться
+окончания текущей операции; затем повторить assertions helper/Paused из 11b.
+Disconnect SSE не отменяет owned task. Уже завершённый push не откатывается.
+При недоступном Docker cleanup Agent остаётся paused; оператор сначала проверяет
+helper по label и устраняет причину. Recovery после аварийной остановки процесса
+не автоматизирован (process-local task registry).
+Actual: PENDING SERVER VERIFICATION
+
 Сервер: **10.228.64.200**. Каталог развёртывания:
 `/home/kkulikov/universal-agent-runtime-sd2`.
 Orchestrator запускается вручную через `nohup`; systemd не используется.
@@ -303,7 +465,7 @@ for build in ('maven', 'gradle'):
         'specification': 'Создай небольшую Java 21 библиотеку Calculator.add(int,int), '
                          'тесты JUnit 5 для положительных, отрицательных чисел и нуля, '
                          'build configuration и .gitignore. Без внешних сервисов и публикации.',
-        'build_system': build, 'branch': 'main', 'publish': False,
+        'build_system': build, 'branch': 'main', 'local_only': True, 'publish': False,
         'max_fix_attempts': 2})['task_id']
     print('AGENT_ID=' + agent, 'TASK_ID=' + task, 'BUILD=' + build, flush=True)
     req = urllib.request.Request(base + f'/ag-ui/development-tasks/{task}/run',
@@ -465,7 +627,7 @@ export AGENT_ID=$(curl --fail -sS -H 'Content-Type: application/json' \
   "$BASE_URL/agents" | .venv/bin/python -c 'import json,sys; print(json.load(sys.stdin)["agent_id"])')
 curl --fail -sS -X POST "$BASE_URL/agents/$AGENT_ID/start"
 export TASK_ID=$(curl --fail -sS -H 'Content-Type: application/json' \
-  -d '{"specification":"Создай Java 21 библиотеку Calculator.add(int,int), JUnit 5 тесты для положительных, отрицательных чисел и нуля, Maven configuration и .gitignore. Без внешних сервисов и публикации. Остальные решения выбери самостоятельно.","build_system":"maven","branch":"main","publish":false,"max_fix_attempts":2}' \
+  -d '{"specification":"Создай Java 21 библиотеку Calculator.add(int,int), JUnit 5 тесты для положительных, отрицательных чисел и нуля, Maven configuration и .gitignore. Без внешних сервисов и публикации. Остальные решения выбери самостоятельно.","build_system":"maven","branch":"main","local_only":true,"publish":false,"max_fix_attempts":2}' \
   "$BASE_URL/agents/$AGENT_ID/development-tasks" \
   | .venv/bin/python -c 'import json,sys; print(json.load(sys.stdin)["task_id"])')
 printf 'AGENT_ID=%s\nTASK_ID=%s\n' "$AGENT_ID" "$TASK_ID"

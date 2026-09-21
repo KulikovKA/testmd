@@ -14,7 +14,6 @@ from universal_agent_runtime.application.ports.development_workspace import (
     WorkspaceResult,
 )
 from universal_agent_runtime.application.ports.repository_credentials import (
-    RepositoryAction,
     SecretPolicyPort,
 )
 from universal_agent_runtime.application.ports.repository_platform import CloneTransport
@@ -35,19 +34,7 @@ def workspace_payload(request: WorkspaceRequest, secrets: SecretPolicyPort) -> d
         secrets.reject(file.path)
         secrets.reject(file.content)
     if request.operation in {WorkspaceOperation.CLONE, WorkspaceOperation.PUSH}:
-        expected = (
-            RepositoryAction.PUSH
-            if request.operation is WorkspaceOperation.PUSH
-            else RepositoryAction.CLONE
-        )
-        if (
-            request.access is None
-            or request.access.action is not expected
-            or request.access.branch != request.branch
-        ):
-            raise DevelopmentFailure("publication_rejected")
-        payload["remote"] = request.access.location
-        payload["publish_authorized"] = expected is RepositoryAction.PUSH
+        raise DevelopmentFailure("publication_rejected")
     return payload
 
 
@@ -97,11 +84,19 @@ class DockerDevelopmentWorkspaceAdapter:
         workspace: str = "/workspace",
         user: str = "10001:10001",
         allowed_hosts: tuple[str, ...] = (),
+        author_name: str = "Admin Sferovich",
+        author_email: str = "foo@mail.sfera-t1.ru",
     ) -> None:
         if user != "10001:10001":
             raise ValueError(
                 "development operations require the non-root Agent identity"
             )
+        if any(
+            not v or len(v) > 128 or any(c in v for c in "\n\r\x00")
+            for v in (author_name, author_email)
+        ):
+            raise ValueError("invalid Git identity")
+        self._author_name, self._author_email = author_name, author_email
         self._client, self._secrets = client, secrets
         self._workspace, self._user, self._allowed_hosts = (
             workspace,
@@ -137,6 +132,8 @@ class DockerDevelopmentWorkspaceAdapter:
                 user=self._user,
                 environment={
                     "UAR_WORKSPACE": self._workspace,
+                    "UAR_GIT_AUTHOR_NAME": self._author_name,
+                    "UAR_GIT_AUTHOR_EMAIL": self._author_email,
                     "UAR_GIT_ALLOWED_HOSTS": ",".join(self._allowed_hosts),
                     "OPENAI_API_KEY": "",
                     "OLLAMA_API_KEY": "",

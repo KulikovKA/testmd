@@ -173,7 +173,7 @@
       "request": {
         "method": "POST",
         "header": [{ "key": "Content-Type", "value": "application/json" }],
-        "body": { "mode": "raw", "raw": "{\"specification\":\"Создай библиотеку Java 21 Calculator.add(int,int) и JUnit 5 тесты для положительных, отрицательных чисел и нуля. Добавь Maven build и .gitignore. Без внешних сервисов.\",\"build_system\":\"maven\",\"branch\":\"main\",\"publish\":false,\"max_fix_attempts\":2}" },
+        "body": { "mode": "raw", "raw": "{\"specification\":\"Создай библиотеку Java 21 Calculator.add(int,int) и JUnit 5 тесты для положительных, отрицательных чисел и нуля. Добавь Maven build и .gitignore. Без внешних сервисов.\",\"build_system\":\"maven\",\"publish\":true,\"max_fix_attempts\":2,\"repository_url\":\"ssh://git@10.228.84.126:30022/test/test.git\",\"base_branch\":\"master\"}" },
         "url": "{{base_url}}/agents/{{agent_id}}/development-tasks"
       }
     },
@@ -186,6 +186,10 @@
         "url": "{{base_url}}/ag-ui/development-tasks/{{task_id}}/run",
         "description": "Проверка AG-UI protocol/E2E. Для диагностики использовать Development Trace и Agent LLM Turns."
       }
+    },
+    {
+      "name": "Get Development Task",
+      "request": { "method": "GET", "url": "{{base_url}}/development-tasks/{{task_id}}" }
     },
     {
       "name": "Development Trace",

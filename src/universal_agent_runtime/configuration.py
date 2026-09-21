@@ -179,6 +179,12 @@ class ApplicationSettings:
     benchmark_timing_enabled: bool = False
     java_development_enabled: bool = False
     repository_allowed_hosts: tuple[str, ...] = ()
+    git_ssh_private_key_file: str | None = field(default=None, repr=False)
+    git_ssh_known_hosts_file: str | None = field(default=None, repr=False)
+    git_ssh_allowed_endpoints: tuple[str, ...] = ()
+    git_helper_image: str = "uar-git-helper:local"
+    git_author_name: str = "Admin Sferovich"
+    git_author_email: str = "foo@mail.sfera-t1.ru"
     sfera_base_url: str | None = None
     sfera_username_secret_id: str | None = None
     sfera_username: str | None = field(default=None, repr=False)
@@ -257,9 +263,13 @@ class ApplicationSettings:
         if self.sfera_base_url is not None and any(
             value is None for value in sfera_credentials
         ):
-            raise ConfigurationError("Sfera configuration requires username and password")
+            raise ConfigurationError(
+                "Sfera configuration requires username and password"
+            )
         if self.sfera_ca_cert_path is not None and self.sfera_base_url is None:
-            raise ConfigurationError("UAR_SFERA_CA_CERT_PATH requires UAR_SFERA_BASE_URL")
+            raise ConfigurationError(
+                "UAR_SFERA_CA_CERT_PATH requires UAR_SFERA_BASE_URL"
+            )
         if self.sfera_default_owner is not None:
             _identifier(
                 {"UAR_SFERA_DEFAULT_OWNER": self.sfera_default_owner},
@@ -280,7 +290,9 @@ class ApplicationSettings:
             if type(value) is not int or value < 1:
                 raise ConfigurationError(f"{name} must be a positive integer")
         if type(self.benchmark_timing_enabled) is not bool:
-            raise ConfigurationError("UAR_BENCHMARK_TIMING_ENABLED must be true or false")
+            raise ConfigurationError(
+                "UAR_BENCHMARK_TIMING_ENABLED must be true or false"
+            )
         if self.sfera_username_secret_id is not None:
             _identifier(
                 {"UAR_SFERA_USERNAME_SECRET_ID": self.sfera_username_secret_id},
@@ -346,13 +358,19 @@ class ApplicationSettings:
             if configured_registry
             else storage_root.resolve().parent / "skills"
         )
-        if not registry_root.is_absolute() or registry_root == Path(registry_root.anchor):
+        if not registry_root.is_absolute() or registry_root == Path(
+            registry_root.anchor
+        ):
             raise ConfigurationError(
                 "UAR_SKILL_REGISTRY_ROOT must be an absolute non-root path"
             )
-        sfera_username_secret_id = values.get("UAR_SFERA_USERNAME_SECRET_ID", "").strip()
+        sfera_username_secret_id = values.get(
+            "UAR_SFERA_USERNAME_SECRET_ID", ""
+        ).strip()
         sfera_username = values.get("UAR_SFERA_USERNAME", "")
-        sfera_password_secret_id = values.get("UAR_SFERA_PASSWORD_SECRET_ID", "").strip()
+        sfera_password_secret_id = values.get(
+            "UAR_SFERA_PASSWORD_SECRET_ID", ""
+        ).strip()
         sfera_password = values.get("UAR_SFERA_PASSWORD", "")
         sfera_default_owner = values.get("UAR_SFERA_DEFAULT_OWNER", "").strip()
         return cls(
@@ -408,6 +426,22 @@ class ApplicationSettings:
                 "UAR_QWEN_WALL_TIME_SECONDS",
             ),
             benchmark_timing_enabled=_boolean(values, "UAR_BENCHMARK_TIMING_ENABLED"),
+            git_ssh_private_key_file=values.get("UAR_GIT_SSH_PRIVATE_KEY_FILE") or None,
+            git_ssh_known_hosts_file=values.get("UAR_GIT_SSH_KNOWN_HOSTS_FILE") or None,
+            git_ssh_allowed_endpoints=tuple(
+                filter(
+                    None,
+                    (
+                        v.strip()
+                        for v in values.get("UAR_GIT_SSH_ALLOWED_ENDPOINTS", "").split(
+                            ","
+                        )
+                    ),
+                )
+            ),
+            git_helper_image=values.get("UAR_GIT_HELPER_IMAGE", "uar-git-helper:local"),
+            git_author_name=values.get("UAR_GIT_AUTHOR_NAME", "Admin Sferovich"),
+            git_author_email=values.get("UAR_GIT_AUTHOR_EMAIL", "foo@mail.sfera-t1.ru"),
             java_development_enabled=_boolean(values, "UAR_JAVA_DEVELOPMENT_ENABLED"),
             repository_allowed_hosts=tuple(
                 host.strip().lower()

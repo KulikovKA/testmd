@@ -160,3 +160,15 @@ endpoints наследуют текущую границу доступа API; �
 [`SERVER_VERIFICATION.md`](../SERVER_VERIFICATION.md). По сообщению пользователя
 baseline Java image/Kata/обычный streaming проверены на сервере. Новая
 observability требует отдельного E2E; локальные doubles его не подтверждают.
+
+## Existing repository Git facts
+
+`repository_clone_started/finished`, `branch_created`, `repository_push_started/finished`
+join the existing `git_commit` trace/CUSTOM facts. They contain only validated
+repository URL, base/working branch, status, duration and safe failure codes.
+Credentials, mount paths, SSH command, host-key contents and raw stderr are absent.
+Clone runs before requirements; disconnect preserves owned work, cancellation waits
+for in-flight helper cleanup. Failure codes include `repository_url_invalid`,
+`repository_not_allowed`, `repository_auth_failed`, `repository_not_found`,
+`repository_clone_failed`, `repository_branch_not_found`, `repository_push_failed`,
+`repository_conflict`, `repository_unavailable`. Existing AG-UI and LLM views remain.

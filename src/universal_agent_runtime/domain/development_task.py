@@ -14,6 +14,7 @@ class DevelopmentState(str, Enum):
     WAITING_FOR_CLARIFICATION = "WAITING_FOR_CLARIFICATION"
     PLANNING = "PLANNING"
     PREPARING_WORKSPACE = "PREPARING_WORKSPACE"
+    CLONING_REPOSITORY = "CLONING_REPOSITORY"
     CREATING_REPOSITORY = "CREATING_REPOSITORY"
     IMPLEMENTING = "IMPLEMENTING"
     TESTING = "TESTING"
@@ -29,7 +30,8 @@ class DevelopmentState(str, Enum):
 S = DevelopmentState
 TERMINAL_STATES = frozenset({S.COMPLETED, S.FAILED, S.CANCELLED})
 TRANSITIONS = {
-    S.CREATED: frozenset({S.ANALYZING_REQUIREMENTS}),
+    S.CREATED: frozenset({S.ANALYZING_REQUIREMENTS, S.CLONING_REPOSITORY}),
+    S.CLONING_REPOSITORY: frozenset({S.ANALYZING_REQUIREMENTS}),
     S.ANALYZING_REQUIREMENTS: frozenset({S.WAITING_FOR_CLARIFICATION, S.PLANNING}),
     S.WAITING_FOR_CLARIFICATION: frozenset({S.ANALYZING_REQUIREMENTS}),
     S.PLANNING: frozenset({S.PREPARING_WORKSPACE}),
@@ -69,6 +71,13 @@ class DevelopmentFailure(Exception):
             "review_failed",
             "fix_limit",
             "repository_unavailable",
+            "repository_url_invalid",
+            "repository_not_allowed",
+            "repository_auth_failed",
+            "repository_not_found",
+            "repository_clone_failed",
+            "repository_branch_not_found",
+            "repository_push_failed",
             "repository_conflict",
             "credential_unavailable",
             "publication_rejected",
@@ -124,6 +133,8 @@ class DevelopmentRequest:
     repository: RepositoryTarget | None = None
     publish: bool = False
     max_fix_attempts: int = 2
+    repository_url: str | None = None
+    base_branch: str = "master"
 
     def __post_init__(self) -> None:
         if not isinstance(self.agent_id, AgentId) or not isinstance(
@@ -138,11 +149,14 @@ class DevelopmentRequest:
         ):
             raise ValueError("invalid specification")
         validate_branch(self.branch)
+        validate_branch(self.base_branch)
         if self.repository is not None and not isinstance(
             self.repository, RepositoryTarget
         ):
             raise ValueError("invalid repository target")
-        if type(self.publish) is not bool or (self.publish and self.repository is None):
+        if type(self.publish) is not bool or (
+            self.publish and self.repository is None and self.repository_url is None
+        ):
             raise ValueError("publication requires a repository")
         if (
             type(self.max_fix_attempts) is not int
@@ -160,12 +174,19 @@ class DevelopmentResult:
     repository_id: str | None = None
     published: bool = False
     execution_backend: str = "test-double"
+    repository_url: str | None = None
+    base_branch: str | None = None
+    working_branch: str | None = None
 
     def __post_init__(self) -> None:
         validate_branch(self.branch)
         if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", self.commit_id) is None:
             raise ValueError("invalid commit")
-        if self.published and self.repository_id is None:
+        if (
+            self.published
+            and self.repository_id is None
+            and self.repository_url is None
+        ):
             raise ValueError("published result requires repository")
 
 

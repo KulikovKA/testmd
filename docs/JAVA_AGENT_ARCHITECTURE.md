@@ -46,34 +46,41 @@ detach, final consistency и commit истории только после ус�
    как существующий Agent repository. Durable recovery не заявляется.
 3. `DevelopmentTaskService` — управление переходами, уточнениями, выполнением
    контролируемых операций, отменой между завершёнными шагами и structured result.
-4. `RepositoryPlatformPort` — metadata/create/get/clone information, без GitLab/
-   Сфера Код DTO и без shell-команд.
-5. `DevelopmentWorkspacePort` — фиксированные операции над проектом и Git,
-   bounded execution/results, без универсального shell API.
-6. `RepositoryCredentialPort` — только opaque reference и scoped authorization;
-   секретное значение остаётся за доверенной границей.
+4. `TrustedGitPort` validates an existing SSH repository URL and performs clone/push.
+   Production never calls `RepositoryPlatformPort.create_repository`; legacy platform
+   adapters remain only as separate test/extension code, without production wiring.
+5. `DevelopmentWorkspacePort` handles file inventory/writes, Java builds and local
+   Git status/diff/add/commit inside Agent.
 
-Порядок стадий: CREATED → ANALYZING_REQUIREMENTS → (WAITING_FOR_CLARIFICATION) →
-PLANNING → PREPARING_WORKSPACE → (CREATING_REPOSITORY) → IMPLEMENTING → TESTING →
-REVIEWING → (FIXING → TESTING) → COMMITTING → (PUSHING) → COMPLETED.
-FAILED/CANCELLED терминальны. Fix-loop ограничен; публикация требует явного
-запроса пользователя и проверенного repository target.
+Repository flow: CREATED -> CLONING_REPOSITORY -> ANALYZING_REQUIREMENTS ->
+PLANNING -> PREPARING_WORKSPACE -> IMPLEMENTING -> TESTING -> REVIEWING ->
+COMMITTING -> PUSHING -> COMPLETED (clarification and bounded fixes unchanged).
 
-## Repository platform и native Git
+## Existing repository and trusted Git boundary
 
-`application/ports/repository_platform.py` содержит provider-neutral values и
-`RepositoryPlatformPort`: create_repository, get_repository, get_clone_information.
-Metadata и clone information не содержат credentials или URL userinfo/query.
-Поздний merge request добавляется отдельной операцией после появления требования.
+User -> UAR API -> DevelopmentWorkflow -> trusted Git helper -> workspace volume
+-> Agent Kata microVM / Qwen / Java build -> trusted Git helper -> remote Git.
 
-Git clone/init/status/diff/add/commit/push остаются командами Git в доверенном
-workspace adapter. Platform API не заменяет native Git. Указание branch/remote,
-автора и разрешения push приходит из application policy, не из ответа модели.
-Push без force; конфликт remote приводит к явной ошибке, без скрытого reset/rebase.
+Agent != trusted Git credential boundary. The short-lived helper has separate
+mount/PID namespaces and read-only key/known_hosts mounts. Paths come only from
+explicit orchestrator configuration. Agent is paused while helper accesses its
+volume; helper is removed before Agent resumes, including failures/cancellation.
+If removal is unconfirmed, Agent stays paused and operation fails closed.
 
-Первый провайдер тестов — `FakeRepositoryPlatformAdapter`. Bare remote создаётся
-временным Git fixture; после push результат проверяется независимым clone/show.
-Внешние Git services для локальных suites не используются.
+Clone selects the user's existing base branch and creates `uar/<task-id>` before
+requirements/planning. Push copies only bounded regular Git object files into a
+fresh temporary bare repository; Agent config/hooks/refs/alternates are never
+interpreted with credentials. It verifies ancestry against fetched base, then
+pushes the exact commit to the task branch without force or history rewriting.
+No Sfera REST API, repository creation, ssh-agent forwarding or host shell API.
+
+Public input: `repository_url`, `base_branch`, `publish`, `specification`,
+`build_system`, `max_fix_attempts`. Only configured host:port pairs and canonical
+`ssh://git@host:port/path.git` URLs are accepted. Legacy `repository` is rejected.
+An explicit `local_only: true` request without URL supports the no-publish mode.
+Result includes repository URL, base/working branch, SHA, published/files/checks
+and execution backend. Git identity is per operation via `UAR_GIT_AUTHOR_NAME`
+and `UAR_GIT_AUTHOR_EMAIL`; global/system Git configuration is never modified.
 
 ## Workspace и выполнение Java
 
@@ -83,7 +90,7 @@ bash/curl/unzip при сохранении Qwen и non-root runtime.
 
 Доверенный helper принимает перечисление операций и структурированные значения:
 подготовка каталога, запись проверенных файлов, сборка/тесты, Git status/diff/
-commit/push. Он не принимает произвольную командную строку. Запуск ограничен
+commit. Remote clone/push are rejected by the production Agent helper. Он не принимает произвольную командную строку. Запуск ограничен
 временем, объёмом вывода и фиксированным working directory. Файлы модели не могут
 указывать `.git`, служебные каталоги, абсолютные пути, `..`, symlinks или устройства.
 
@@ -168,7 +175,7 @@ session. Скрипт helper расположен в неизменяемом о
 
 | HTTP | Назначение |
 | --- | --- |
-| `POST /agents/{agent_id}/development-tasks` | Создать задачу с specification, build_system, branch, optional repository, publish, max_fix_attempts |
+| `POST /agents/{agent_id}/development-tasks` | Создать задачу с specification, build_system, repository_url, base_branch, publish, max_fix_attempts |
 | `GET /development-tasks/{task_id}` | State, questions, plan, failure_code, structured result |
 | `POST /development-tasks/{task_id}/clarifications` | Передать ответ через поле answer |
 | `POST /development-tasks/{task_id}/cancel` | Запросить отмену после текущей операции |
@@ -181,7 +188,7 @@ Task run использует сохранённое ТЗ. Его DTO содер
 После `clarifications` нужен новый task run. До трёх раундов уточнения и до трёх
 исправлений; по умолчанию два исправления. Ошибка/отмена не создаёт успешный result.
 
-Result содержит branch, commit_id, files, checks, repository_id, published и
+Result содержит repository_url, base_branch, working_branch, commit_id, files, checks, published и
 execution_backend. Только backend `agent` означает вызов production adapter;
 сам по себе этот маркер не заменяет серверную проверку. Полный local workflow
 использует настоящий Git и явно обозначенный fake Java build.

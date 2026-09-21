@@ -11,6 +11,15 @@ async function fixture(action) {
   try { await action(root, (operation, options = {}) => execute({ task_id: "task-one", branch: "main", operation, ...options }, { root, localTestRoot: root })); }
   finally { await fs.rm(root, { recursive: true, force: true }); }
 }
+
+test("production Agent refuses remote Git operations without executing commands", () => fixture(async (root) => {
+  for (const operation of ["clone", "push"]) {
+    let called = false;
+    await assert.rejects(execute({ task_id: "task-one", operation, remote: "ssh://git@10.228.84.126:30022/test/test.git", publish_authorized: true },
+      { root, run: async () => { called = true; return { success: true }; } }), /publication_rejected/);
+    assert.equal(called, false);
+  }
+}));
 function git(cwd, ...args) {
   const result = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 30000, shell: false, env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null" } });
   assert.equal(result.status, 0, result.stderr);

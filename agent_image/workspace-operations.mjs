@@ -37,8 +37,8 @@ function cleanEnvironment(root) {
   return { ...environment, HOME: root, USERPROFILE: root, LANG: "C.UTF-8", LC_ALL: "C.UTF-8",
     GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
     GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", GIT_ASKPASS: "", SSH_ASKPASS: "",
-    GIT_AUTHOR_NAME: "Java Agent", GIT_AUTHOR_EMAIL: "java-agent@example.invalid",
-    GIT_COMMITTER_NAME: "Java Agent", GIT_COMMITTER_EMAIL: "java-agent@example.invalid",
+    GIT_AUTHOR_NAME: process.env.UAR_GIT_AUTHOR_NAME || "Admin Sferovich", GIT_AUTHOR_EMAIL: process.env.UAR_GIT_AUTHOR_EMAIL || "foo@mail.sfera-t1.ru",
+    GIT_COMMITTER_NAME: process.env.UAR_GIT_AUTHOR_NAME || "Admin Sferovich", GIT_COMMITTER_EMAIL: process.env.UAR_GIT_AUTHOR_EMAIL || "foo@mail.sfera-t1.ru",
     GRADLE_USER_HOME: path.join(root, ".gradle"), MAVEN_CONFIG: path.join(root, ".m2") };
 }
 export function runBounded(argv, cwd, environment, timeoutMs = 120000) {
@@ -145,6 +145,7 @@ function remoteLocation(value, root, policy) {
 
 export async function execute(request, { root = "/workspace", allowedHosts = [], localTestRoot = null, timeoutMs = 120000, run = runBounded } = {}) {
   if (!identifier(request.task_id)) reject();
+  if (["clone", "push"].includes(request.operation) && !localTestRoot) reject("publication_rejected");
   const selectedBranch = branch(request.branch || "main");
   const rootInfo = await fs.lstat(root);
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) reject();

@@ -18,6 +18,11 @@ TRACE_KINDS = frozenset(
         "command_finished",
         "review_result",
         "git_commit",
+        "repository_clone_started",
+        "repository_clone_finished",
+        "branch_created",
+        "repository_push_started",
+        "repository_push_finished",
         "task_status",
     }
 )

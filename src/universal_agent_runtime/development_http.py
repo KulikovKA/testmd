@@ -18,16 +18,8 @@ from universal_agent_runtime.domain.development_task import (
     BuildSystem,
     DevelopmentFailure,
     DevelopmentRequest,
-    RepositoryTarget,
 )
 from universal_agent_runtime.domain.identifiers import AgentId
-
-
-class RepositoryInput(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-    namespace: str = Field(min_length=1, max_length=128)
-    name: str = Field(min_length=1, max_length=64)
-    repository_id: str | None = None
 
 
 class DevelopmentInput(BaseModel):
@@ -35,7 +27,9 @@ class DevelopmentInput(BaseModel):
     specification: str = Field(min_length=1, max_length=8000)
     build_system: Literal["maven", "gradle"] = "maven"
     branch: str = "main"
-    repository: RepositoryInput | None = None
+    repository_url: str | None = None
+    base_branch: str = "master"
+    local_only: bool = False
     publish: bool = False
     max_fix_attempts: int = Field(default=2, ge=0, le=3)
 
@@ -106,15 +100,20 @@ def register_development_routes(
                 payload.specification,
                 BuildSystem(payload.build_system),
                 payload.branch,
-                RepositoryTarget(**payload.repository.model_dump())
-                if payload.repository
-                else None,
+                None,
                 payload.publish,
                 payload.max_fix_attempts,
+                payload.repository_url,
+                payload.base_branch,
             )
         except ValueError:
             raise DevelopmentFailure("invalid_request") from None
-        return task_response(require().create(request))
+        workflow = require()
+        if (payload.repository_url is None and not payload.local_only) or (
+            payload.repository_url is not None and payload.local_only
+        ):
+            raise DevelopmentFailure("invalid_request")
+        return task_response(workflow.create(request))
 
     @app.get("/development-tasks/{task_id}")
     async def read(task_id: str):

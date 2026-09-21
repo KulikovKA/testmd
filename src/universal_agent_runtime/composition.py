@@ -12,6 +12,10 @@ from universal_agent_runtime.adapters.docker_runtime import (
     DockerRuntime,
     DockerWorkload,
 )
+from universal_agent_runtime.adapters.docker_trusted_git import (
+    DockerTrustedGitAdapter,
+    TrustedGitSettings,
+)
 from universal_agent_runtime.adapters.filesystem_skill_registry import (
     FilesystemSkillRegistry,
 )
@@ -27,10 +31,6 @@ from universal_agent_runtime.adapters.qwen_session import (
 )
 from universal_agent_runtime.adapters.repository_access import (
     ConfiguredSecretPolicy,
-    PublicRepositoryCredentialAdapter,
-)
-from universal_agent_runtime.adapters.sfera_code_repository import (
-    SferaCodeRepositoryAdapter,
 )
 from universal_agent_runtime.adapters.skill_packages import SkillPackageCatalog
 from universal_agent_runtime.application.agent_chat import (
@@ -53,12 +53,6 @@ from universal_agent_runtime.application.ports.agent_runtime import AgentRuntime
 from universal_agent_runtime.application.ports.development_workspace import (
     DevelopmentWorkspacePort,
 )
-from universal_agent_runtime.application.ports.repository_credentials import (
-    RepositoryCredentialPort,
-)
-from universal_agent_runtime.application.ports.repository_platform import (
-    RepositoryPlatformPort,
-)
 from universal_agent_runtime.application.ports.runtime_values import (
     EnvironmentVariable,
     NetworkDestination,
@@ -66,6 +60,7 @@ from universal_agent_runtime.application.ports.runtime_values import (
     ResourceLimits,
     SecretBinding,
 )
+from universal_agent_runtime.application.ports.trusted_git import TrustedGitPort
 from universal_agent_runtime.application.ports.workspace_inventory import (
     WorkspaceInventoryReader,
 )
@@ -89,6 +84,7 @@ class ApplicationComposition:
     workspace_reader: WorkspaceInventoryReader | None = None
     development: DevelopmentWorkflow | None = None
     development_workspace: DevelopmentWorkspacePort | None = None
+    trusted_git: TrustedGitPort | None = None
     package_name: str = "universal_agent_runtime"
 
     async def close(self) -> None:
@@ -99,7 +95,12 @@ class ApplicationComposition:
             await self.development.close()
         if self.chat is not None:
             await self.chat.close()
-        for dependency in (self.development_workspace, self.interaction, self.runtime):
+        for dependency in (
+            self.trusted_git,
+            self.development_workspace,
+            self.interaction,
+            self.runtime,
+        ):
             if dependency is None or id(dependency) in closed:
                 continue
             closed.add(id(dependency))
@@ -122,8 +123,7 @@ def compose_application(
     interaction: AgentInteraction | None = None,
     repository: AgentRepository | None = None,
     development_workspace: DevelopmentWorkspacePort | None = None,
-    repository_platform: RepositoryPlatformPort | None = None,
-    repository_credentials: RepositoryCredentialPort | None = None,
+    trusted_git: TrustedGitPort | None = None,
 ) -> ApplicationComposition:
     """Select deployment adapters at the composition root or accept explicit fakes."""
 
@@ -155,6 +155,8 @@ def compose_application(
                     settings.qwen_api_key,
                     settings.sfera_username,
                     settings.sfera_password,
+                    settings.git_ssh_private_key_file,
+                    settings.git_ssh_known_hosts_file,
                 )
                 if value
             ),
@@ -170,6 +172,8 @@ def compose_application(
                     settings.qwen_api_key,
                     settings.sfera_username,
                     settings.sfera_password,
+                    settings.git_ssh_private_key_file,
+                    settings.git_ssh_known_hosts_file,
                 )
                 if value
             )
@@ -183,15 +187,28 @@ def compose_application(
                 workspace=settings.docker_workspace_target,
                 user=settings.docker_user,
                 allowed_hosts=settings.repository_allowed_hosts,
+                author_name=settings.git_author_name,
+                author_email=settings.git_author_email,
+            )
+        if trusted_git is None and settings.java_development_enabled:
+            import docker
+
+            trusted_git = DockerTrustedGitAdapter(
+                docker.from_env(timeout=310),
+                TrustedGitSettings(
+                    settings.git_ssh_private_key_file,
+                    settings.git_ssh_known_hosts_file,
+                    settings.git_ssh_allowed_endpoints,
+                    settings.git_helper_image,
+                ),
+                workspace=settings.docker_workspace_target,
             )
         development = DevelopmentWorkflow(
             DevelopmentTaskService(InMemoryDevelopmentTaskRepository(), repository),
             chat,
             development_workspace,
-            repository_platform or SferaCodeRepositoryAdapter(),
-            repository_credentials
-            or PublicRepositoryCredentialAdapter(settings.repository_allowed_hosts),
             secrets,
+            trusted_git,
         )
     return ApplicationComposition(
         settings,
@@ -203,6 +220,7 @@ def compose_application(
         skill_catalog=catalog,
         development=development,
         development_workspace=development_workspace,
+        trusted_git=trusted_git,
         debug_reader=interaction if isinstance(interaction, AgentDebugReader) else None,
         llm_turns_reader=interaction
         if isinstance(interaction, AgentLLMTurnsReader)

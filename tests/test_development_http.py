@@ -6,12 +6,6 @@ from fastapi.testclient import TestClient
 
 from tests import test_ag_ui as existing_http
 from tests.test_development_workflow import Model, Workspace
-from universal_agent_runtime.adapters.fake_repository_platform import (
-    FakeRepositoryPlatformAdapter,
-)
-from universal_agent_runtime.adapters.repository_access import (
-    PublicRepositoryCredentialAdapter,
-)
 from universal_agent_runtime.application.development_workflow import JAVA_SKILLS
 from universal_agent_runtime.composition import compose_application
 from universal_agent_runtime.http_api import create_application
@@ -26,10 +20,6 @@ class DevelopmentHttpTests(unittest.TestCase):
                 runtime=original.runtime,
                 interaction=model,
                 development_workspace=workspace,
-                repository_platform=FakeRepositoryPlatformAdapter(root),
-                repository_credentials=PublicRepositoryCredentialAdapter(
-                    local_test_root=root
-                ),
             )
         )
 
@@ -52,7 +42,7 @@ class DevelopmentHttpTests(unittest.TestCase):
                 )
                 task = client.post(
                     f"/agents/{agent_id}/development-tasks",
-                    json={"specification": "Java library"},
+                    json={"specification": "Java library", "local_only": True},
                 )
                 self.assertEqual(task.status_code, 201, task.text)
                 task_id = task.json()["task_id"]
@@ -132,7 +122,7 @@ class DevelopmentHttpTests(unittest.TestCase):
                 self.assertEqual(
                     client.post(
                         "/agents/agent-one/development-tasks",
-                        json={"specification": "project"},
+                        json={"specification": "project", "local_only": True},
                     ).status_code,
                     503,
                 )
@@ -143,7 +133,7 @@ class DevelopmentHttpTests(unittest.TestCase):
                 self.assertEqual(client.post(f"/agents/{agent}/start").status_code, 200)
                 task = client.post(
                     f"/agents/{agent}/development-tasks",
-                    json={"specification": "project"},
+                    json={"specification": "project", "local_only": True},
                 ).json()["task_id"]
                 response = client.post(
                     f"/ag-ui/development-tasks/{task}/run",

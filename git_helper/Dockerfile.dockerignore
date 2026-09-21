@@ -1,0 +1,14 @@
+**
+!git_helper/
+!git_helper/Dockerfile
+!src/
+!src/universal_agent_runtime/
+!src/universal_agent_runtime/domain/
+!src/universal_agent_runtime/domain/identifiers.py
+!src/universal_agent_runtime/domain/development_task.py
+!src/universal_agent_runtime/domain/development_trace.py
+!src/universal_agent_runtime/application/
+!src/universal_agent_runtime/application/ports/
+!src/universal_agent_runtime/application/ports/trusted_git.py
+!src/universal_agent_runtime/adapters/
+!src/universal_agent_runtime/adapters/trusted_git_helper.py

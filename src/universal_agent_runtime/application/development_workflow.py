@@ -3,7 +3,7 @@
 import asyncio
 import json
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -28,13 +28,11 @@ from universal_agent_runtime.application.ports.development_workspace import (
     WorkspaceOperation as W,
 )
 from universal_agent_runtime.application.ports.repository_credentials import (
-    RepositoryAction,
-    RepositoryCredentialPort,
     SecretPolicyPort,
 )
-from universal_agent_runtime.application.ports.repository_platform import (
-    CreateRepositoryRequest,
-    RepositoryPlatformPort,
+from universal_agent_runtime.application.ports.trusted_git import (
+    GitRequest,
+    TrustedGitPort,
 )
 from universal_agent_runtime.domain.development_task import (
     TERMINAL_STATES,
@@ -61,19 +59,22 @@ class DevelopmentWorkflow:
         service: DevelopmentTaskService,
         chat: AgentChatService,
         workspace: DevelopmentWorkspacePort,
-        platform: RepositoryPlatformPort,
-        credentials: RepositoryCredentialPort,
         secrets: SecretPolicyPort,
+        git: TrustedGitPort | None = None,
     ) -> None:
         self.service, self.chat, self.workspace = service, chat, workspace
-        self.platform, self.credentials, self.secrets = platform, credentials, secrets
+        self.git, self.secrets = git, secrets
         self._pending: set[asyncio.Task] = set()
 
     def create(self, request: DevelopmentRequest):
         self.secrets.reject(request.specification)
         self.secrets.reject(request.branch)
         if request.repository is not None:
-            self.secrets.reject(json.dumps(asdict(request.repository)))
+            raise DevelopmentFailure("invalid_request")
+        if request.repository_url is not None:
+            if self.git is None:
+                raise DevelopmentFailure("repository_unavailable")
+            self.git.validate(request.repository_url)
         return self.service.create(request)
 
     def clarify(self, task_id: str, answer: str):
@@ -118,6 +119,9 @@ class _DevelopmentRun:
         self.w = workflow
         self.task_id = task_id
         self.request = workflow.service.get(task_id).request
+        self.branch = (
+            f"uar/{task_id}" if self.request.repository_url else self.request.branch
+        )
         self.turn_id, self.message_id = uuid4().hex, uuid4().hex
         self.progress = TurnDeltas()
         self.text = ""
@@ -172,7 +176,7 @@ class _DevelopmentRun:
             S.ANALYZING_REQUIREMENTS: "requirements",
             S.PLANNING: "planning",
             S.PREPARING_WORKSPACE: "workspace",
-            S.CREATING_REPOSITORY: "repository",
+            S.CLONING_REPOSITORY: "repository",
             S.IMPLEMENTING: "implementation",
             S.TESTING: "testing",
             S.REVIEWING: "review",
@@ -227,7 +231,7 @@ class _DevelopmentRun:
                 WorkspaceRequest(
                     self.task_id,
                     operation,
-                    branch=self.request.branch,
+                    branch=self.branch,
                     build_system=self.request.build_system,
                     **kwargs,
                 ),
@@ -416,9 +420,61 @@ class _DevelopmentRun:
         except (TypeError, ValueError):
             raise DevelopmentFailure("invalid_model_result") from None
 
+    async def repository_operation(self, action: str, commit_id=None):
+        self.checkpoint()
+        request = GitRequest(
+            self.task_id,
+            self.request.repository_url,
+            self.request.base_branch,
+            self.branch,
+            commit_id,
+        )
+        started = time.perf_counter()
+        facts = {
+            "repository_url": request.repository_url,
+            "base_branch": request.base_branch,
+            "working_branch": self.branch,
+        }
+        await self.record(
+            f"repository_{action}_started", "started", f"Git {action}", facts
+        )
+        try:
+            await getattr(self.w.git, action)(self.request.agent_id, request)
+        except DevelopmentFailure as error:
+            await self.record(
+                f"repository_{action}_finished",
+                "failed",
+                f"Git {action} failed",
+                {**facts, "failure_code": error.code},
+                closing=True,
+            )
+            raise
+        await self.record(
+            f"repository_{action}_finished",
+            "completed",
+            f"Git {action} completed",
+            {**facts, "duration_ms": round((time.perf_counter() - started) * 1000)},
+        )
+        if action == "clone":
+            await self.record(
+                "branch_created", "completed", "Working branch created", facts
+            )
+        self.checkpoint()
+
     async def workflow(self) -> None:
+        if (
+            self.request.repository_url
+            and self.w.service.get(self.task_id).state is S.CREATED
+        ):
+            await self.stage(S.CLONING_REPOSITORY)
+            await self.repository_operation("clone")
         await self.stage(S.ANALYZING_REQUIREMENTS)
-        value = await self.reason({})
+        context = (
+            {"files": [asdict(f) for f in await self.files()]}
+            if self.request.repository_url
+            else {}
+        )
+        value = await self.reason(context)
         questions = self.strings(value.get("questions"), 5, empty=True)
         await self.record(
             "requirements_result",
@@ -439,40 +495,13 @@ class _DevelopmentRun:
             )
             return
         await self.stage(S.PLANNING, questions=())
-        plan = self.strings((await self.reason({})).get("steps"), 12)
+        plan = self.strings((await self.reason(context)).get("steps"), 12)
         await self.record(
             "plan_ready", "completed", "План подготовлен", {"steps": len(plan)}
         )
         await self.stage(S.PREPARING_WORKSPACE, plan=plan)
         await self.operation(W.PREPARE)
-        repository_id = None
-        clone = None
-        if self.request.repository is not None:
-            await self.stage(S.CREATING_REPOSITORY)
-            target = self.request.repository
-            repository = (
-                await self.w.platform.get_repository(target.repository_id)
-                if target.repository_id
-                else await self.w.platform.create_repository(
-                    CreateRepositoryRequest(
-                        target.namespace, target.name, self.task_id, self.request.branch
-                    )
-                )
-            )
-            if (repository.namespace, repository.name) != (
-                target.namespace,
-                target.name,
-            ):
-                raise DevelopmentFailure("repository_conflict")
-            repository_id = repository.repository_id
-            clone = await self.w.platform.get_clone_information(repository_id)
-            if clone.repository_id != repository_id:
-                raise DevelopmentFailure("repository_conflict")
-            access = self.w.credentials.authorize(
-                clone, branch=self.request.branch, action=RepositoryAction.CLONE
-            )
-            await self.operation(W.CLONE, access=access)
-        else:
+        if self.request.repository_url is None:
             await self.operation(W.INIT)
         await self.stage(S.IMPLEMENTING)
         await self.implement()
@@ -528,35 +557,24 @@ class _DevelopmentRun:
         if not isinstance(commit.commit_id, str):
             raise DevelopmentFailure("operation_failed")
         result = DevelopmentResult(
-            self.request.branch,
+            self.branch,
             commit.commit_id,
             tuple(f.path for f in files),
             checks,
-            repository_id,
+            None,
             False,
             self.w.workspace.execution_backend,
+            self.request.repository_url,
+            self.request.base_branch if self.request.repository_url else None,
+            self.branch,
         )
         await self.record(
             "git_commit", "completed", "Коммит создан", {"commit_id": result.commit_id}
         )
         if self.request.publish:
             await self.stage(S.PUSHING)
-            access = self.w.credentials.authorize(
-                clone,
-                branch=self.request.branch,
-                action=RepositoryAction.PUSH,
-                publish_authorized=True,
-            )
-            await self.operation(W.PUSH, access=access)
-            result = DevelopmentResult(
-                self.request.branch,
-                commit.commit_id,
-                result.files,
-                checks,
-                repository_id,
-                True,
-                self.w.workspace.execution_backend,
-            )
+            await self.repository_operation("push", commit.commit_id)
+            result = replace(result, published=True)
         await self.stage(S.COMPLETED, result=result)
 
     async def execute(self) -> tuple[Message, ...]:

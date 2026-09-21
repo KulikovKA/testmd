@@ -14,15 +14,11 @@ from universal_agent_runtime.adapters.docker_development_workspace import (
     workspace_payload,
     workspace_result,
 )
-from universal_agent_runtime.adapters.fake_repository_platform import (
-    FakeRepositoryPlatformAdapter,
-)
 from universal_agent_runtime.adapters.in_memory_development_tasks import (
     InMemoryDevelopmentTaskRepository,
 )
 from universal_agent_runtime.adapters.repository_access import (
     ConfiguredSecretPolicy,
-    PublicRepositoryCredentialAdapter,
 )
 from universal_agent_runtime.ag_ui import ag_ui_events
 from universal_agent_runtime.application.agent_lifecycle import AgentLifecycleFailure
@@ -44,7 +40,6 @@ from universal_agent_runtime.application.ports.interaction_values import (
 from universal_agent_runtime.domain.development_task import (
     DevelopmentFailure,
     DevelopmentRequest,
-    RepositoryTarget,
 )
 from universal_agent_runtime.domain.development_task import DevelopmentState as S
 
@@ -135,8 +130,6 @@ def workflow_fixture(root, model=None, workspace=None):
         DevelopmentTaskService(InMemoryDevelopmentTaskRepository(), agents),
         chat,
         workspace,
-        FakeRepositoryPlatformAdapter(root),
-        PublicRepositoryCredentialAdapter(local_test_root=root),
         ConfiguredSecretPolicy(),
     )
     return workflow, agent_id, model, workspace
@@ -311,21 +304,16 @@ class DevelopmentGitTests(unittest.IsolatedAsyncioTestCase):
                 root, workspace=LocalWorkspace(root, node)
             )
 
-            class Platform(FakeRepositoryPlatformAdapter):
-                async def create_repository(self, request):
-                    metadata = await super().create_repository(request)
-                    clone = await self.get_clone_information(metadata.repository_id)
-                    native_git(
-                        "init", "--bare", "--initial-branch=main", clone.location
-                    )
-                    return metadata
+            from tests.test_trusted_git import URL, LocalTrustedGit, seed_remote
 
-            workflow.platform = Platform(root)
+            remote = seed_remote(root)
+            workflow.git = LocalTrustedGit(root, remote)
             task = workflow.create(
                 DevelopmentRequest(
                     agent_id,
                     "Java library",
-                    repository=RepositoryTarget("team", "library"),
+                    repository_url=URL,
+                    base_branch="master",
                     publish=True,
                 )
             )
@@ -333,17 +321,19 @@ class DevelopmentGitTests(unittest.IsolatedAsyncioTestCase):
             result = workflow.service.get(task.task_id)
             self.assertEqual(result.state, S.COMPLETED, result.failure_code)
             self.assertTrue(result.result.published)
-            remote = (
-                await workflow.platform.get_clone_information(
-                    result.result.repository_id
-                )
-            ).location
             self.assertEqual(
-                native_git("--git-dir", remote, "rev-parse", "main"),
+                native_git(
+                    "--git-dir", remote, "rev-parse", result.result.working_branch
+                ),
                 result.result.commit_id,
             )
             self.assertIn(
                 "int sum",
-                native_git("--git-dir", remote, "show", "main:src/main/java/App.java"),
+                native_git(
+                    "--git-dir",
+                    remote,
+                    "show",
+                    result.result.working_branch + ":src/main/java/App.java",
+                ),
             )
             self.assertEqual(events[-1]["type"], "RUN_FINISHED")
