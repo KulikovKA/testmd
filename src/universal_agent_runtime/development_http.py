@@ -120,6 +120,18 @@ def register_development_routes(
     async def read(task_id: str):
         return task_response(get(task_id))
 
+    @app.get("/development-tasks/{task_id}/trace")
+    async def trace(task_id: str):
+        task = get(task_id)
+        return {
+            "task_id": task.task_id,
+            "agent_id": task.request.agent_id.value,
+            "state": task.state.value,
+            "events": [event.to_dict() for event in task.trace],
+            "summary": task.trace[-1].summary if task.trace else "Задача создана",
+            "failure_code": task.failure_code,
+        }
+
     @app.post("/development-tasks/{task_id}/clarifications")
     async def clarify(task_id: str, payload: ClarificationInput):
         get(task_id)

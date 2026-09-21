@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from dataclasses import asdict
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -17,6 +18,7 @@ from universal_agent_runtime.application.agent_lifecycle import (
     AgentLifecycleOperation,
 )
 from universal_agent_runtime.application.development_tasks import DevelopmentTaskService
+from universal_agent_runtime.application.observability_text import observable_text
 from universal_agent_runtime.application.ports.development_workspace import (
     DevelopmentWorkspacePort,
     ProjectFile,
@@ -24,9 +26,6 @@ from universal_agent_runtime.application.ports.development_workspace import (
 )
 from universal_agent_runtime.application.ports.development_workspace import (
     WorkspaceOperation as W,
-)
-from universal_agent_runtime.application.ports.interaction_values import (
-    AssistantTextDelta,
 )
 from universal_agent_runtime.application.ports.repository_credentials import (
     RepositoryAction,
@@ -96,7 +95,11 @@ class DevelopmentWorkflow:
         self._pending.add(owned)
         owned.add_done_callback(self._finished)
         return AcceptedTurn(
-            task.request.agent_id, run.turn_id, owned, run.message_id, run.deltas
+            task.request.agent_id,
+            run.turn_id,
+            owned,
+            run.message_id,
+            progress=run.progress,
         )
 
     def _finished(self, task: asyncio.Task) -> None:
@@ -116,37 +119,161 @@ class _DevelopmentRun:
         self.task_id = task_id
         self.request = workflow.service.get(task_id).request
         self.turn_id, self.message_id = uuid4().hex, uuid4().hex
-        self.deltas = TurnDeltas()
+        self.progress = TurnDeltas()
         self.text = ""
+        self.phase = "task"
+        self.attempt = 0
+        self.step_name = None
+
+    async def record(
+        self, kind: str, status: str, summary: str, data=None, *, closing=False
+    ):
+        def safe(value):
+            if isinstance(value, str):
+                return observable_text(self.w.secrets.redact(value))
+            if isinstance(value, list):
+                return [safe(item) for item in value]
+            if isinstance(value, dict):
+                return {key: safe(item) for key, item in value.items()}
+            return value
+
+        event = self.w.service.record(
+            self.task_id,
+            type=kind,
+            phase=self.phase,
+            status=status,
+            step_name=self.step_name,
+            attempt=self.attempt,
+            summary=safe(summary),
+            data_json=json.dumps(safe(data or {}), ensure_ascii=False),
+            closing=closing,
+        )
+        await self.progress.emit(event)
+
+    async def finish_step(self, status="completed"):
+        if self.step_name is not None:
+            await self.record(
+                "phase",
+                status,
+                "Этап завершён" if status == "completed" else "Этап остановлен",
+                closing=True,
+            )
+            self.step_name = None
 
     def checkpoint(self) -> None:
         if self.w.service.get(self.task_id).cancel_requested:
             raise DevelopmentFailure("cancelled")
 
-    async def emit(self, text: str) -> None:
-        if len(self.text) + len(text) > 131072:
-            raise DevelopmentFailure("output_limit")
-        self.text += text
-        await self.deltas.emit(AssistantTextDelta(text))
-
     async def stage(self, state: S, **changes) -> None:
         self.checkpoint()
+        await self.finish_step()
         self.w.service.transition(self.task_id, state, **changes)
-        await self.emit(f"\n{state.value}\n")
+        phases = {
+            S.ANALYZING_REQUIREMENTS: "requirements",
+            S.PLANNING: "planning",
+            S.PREPARING_WORKSPACE: "workspace",
+            S.CREATING_REPOSITORY: "repository",
+            S.IMPLEMENTING: "implementation",
+            S.TESTING: "testing",
+            S.REVIEWING: "review",
+            S.FIXING: "fixing",
+            S.COMMITTING: "committing",
+            S.PUSHING: "pushing",
+        }
+        if state in phases:
+            self.phase = phases[state]
+            self.attempt = 1 + sum(
+                e.type == "phase" and e.status == "started" and e.phase == self.phase
+                for e in self.w.service.get(self.task_id).trace
+            )
+            self.step_name = f"{self.phase}:{self.attempt}"
+            try:
+                await self.record(
+                    "phase", "started", "Начат этап", {"state": state.value}
+                )
+            except Exception:
+                self.step_name = None
+                raise
+        else:
+            self.phase, self.attempt, self.step_name = "task", 0, None
+            await self.record(
+                "task_status",
+                "waiting" if state is S.WAITING_FOR_CLARIFICATION else "completed",
+                "Нужно уточнение требований"
+                if state is S.WAITING_FOR_CLARIFICATION
+                else "Задача завершена",
+                {"state": state.value},
+                closing=True,
+            )
 
     async def operation(self, operation: W, **kwargs):
         self.checkpoint()
-        result = await self.w.workspace.execute(
-            self.request.agent_id,
-            WorkspaceRequest(
-                self.task_id,
-                operation,
-                branch=self.request.branch,
-                build_system=self.request.build_system,
-                **kwargs,
-            ),
-        )
-        self.checkpoint()
+        command = None
+        if operation in {W.TEST, W.PACKAGE}:
+            command = (
+                "mvn " + ("test" if operation is W.TEST else "package")
+                if self.request.build_system.value == "maven"
+                else "gradle " + ("test" if operation is W.TEST else "build")
+            )
+            await self.record(
+                "command_started",
+                "started",
+                "Запуск команды",
+                {"operation": operation.value, "command": command},
+            )
+        try:
+            result = await self.w.workspace.execute(
+                self.request.agent_id,
+                WorkspaceRequest(
+                    self.task_id,
+                    operation,
+                    branch=self.request.branch,
+                    build_system=self.request.build_system,
+                    **kwargs,
+                ),
+            )
+        except Exception:
+            if command:
+                await self.record(
+                    "command_finished",
+                    "failed",
+                    "Команда не завершилась успешно",
+                    {
+                        "operation": operation.value,
+                        "command": command,
+                        "success": False,
+                        "exit_code": None,
+                    },
+                    closing=True,
+                )
+            raise
+        if command:
+            # Only a validated command label can replace the planned build command.
+            actual = (
+                result.check
+                if result.check
+                in {
+                    "mvn test",
+                    "mvn package",
+                    "gradle test",
+                    "gradle build",
+                    "./gradlew test",
+                    "./gradlew build",
+                }
+                else command
+            )
+            await self.record(
+                "command_finished",
+                "completed" if result.success else "failed",
+                "Команда завершена",
+                {
+                    "operation": operation.value,
+                    "command": actual,
+                    "success": result.success,
+                    "exit_code": result.exit_code,
+                    "execution_backend": self.w.workspace.execution_backend,
+                },
+            )
         if not result.success and operation not in {W.TEST, W.PACKAGE}:
             raise DevelopmentFailure("operation_failed")
         return result
@@ -171,38 +298,50 @@ class _DevelopmentRun:
         turn = self.w.chat.begin(
             self.request.agent_id, prompt, stream=True, development_task_id=self.task_id
         )
-        streamed = False
+        agent = self.w.service.agents.get(self.request.agent_id)
+        number = len(agent.messages) // 2 + 1
+        started = time.perf_counter()
+        # Keep the normal parser/redactor/coalescer and stream/final consistency
+        # checks active, but detach internal JSON from the public text channel.
+        if turn.deltas is not None:
+            turn.deltas.detach()
         try:
-            if turn.deltas is not None:
-                while True:
-                    if not turn.deltas.queue.empty():
-                        delta = turn.deltas.queue.get_nowait()
-                        streamed = True
-                        await self.emit(delta.text)
-                    elif turn.task.done():
-                        break
-                    else:
-                        getter = asyncio.create_task(turn.deltas.queue.get())
-                        try:
-                            await asyncio.wait(
-                                {getter, turn.task}, return_when=asyncio.FIRST_COMPLETED
-                            )
-                            if getter.done():
-                                streamed = True
-                                await self.emit(getter.result().text)
-                        finally:
-                            if not getter.done():
-                                getter.cancel()
-                            await asyncio.gather(getter, return_exceptions=True)
+            await self.record(
+                "llm_turn_started",
+                "started",
+                "Вызов Qwen",
+                {"turn": number, "phase": task.state.value},
+            )
             messages = await asyncio.shield(turn.task)
             content = messages[-1].content
-            if not streamed:
-                await self.emit(content)
+        except Exception:
+            await self.record(
+                "llm_turn_finished",
+                "failed",
+                "Вызов Qwen завершился ошибкой",
+                {
+                    "turn": number,
+                    "phase": task.state.value,
+                    "duration_ms": round((time.perf_counter() - started) * 1000),
+                },
+                closing=True,
+            )
+            raise
         finally:
             if turn.deltas is not None:
                 turn.deltas.detach()
             # Do not release Agent while a native Qwen turn is still active.
             await asyncio.gather(asyncio.shield(turn.task), return_exceptions=True)
+        await self.record(
+            "llm_turn_finished",
+            "completed",
+            "Ответ Qwen получен",
+            {
+                "turn": number,
+                "phase": task.state.value,
+                "duration_ms": round((time.perf_counter() - started) * 1000),
+            },
+        )
         self.checkpoint()
         try:
             result = json.loads(content)
@@ -239,8 +378,15 @@ class _DevelopmentRun:
         return result.files
 
     async def implement(self, *, feedback: str = "") -> None:
+        before = {file.path: file.content for file in await self.files()}
         value = await self.reason(
-            {"files": [asdict(f) for f in await self.files()], "feedback": feedback}
+            {
+                "files": [
+                    {"path": path, "content": content}
+                    for path, content in before.items()
+                ],
+                "feedback": feedback,
+            }
         )
         try:
             if (
@@ -254,6 +400,19 @@ class _DevelopmentRun:
                 self.w.secrets.reject(file.path)
                 self.w.secrets.reject(file.content)
             await self.operation(W.WRITE, files=files)
+            await self.record(
+                "files_changed",
+                "completed",
+                "Файлы записаны",
+                {
+                    "created": sorted(f.path for f in files if f.path not in before),
+                    "modified": sorted(
+                        f.path
+                        for f in files
+                        if f.path in before and f.content != before[f.path]
+                    ),
+                },
+            )
         except (TypeError, ValueError):
             raise DevelopmentFailure("invalid_model_result") from None
 
@@ -261,6 +420,12 @@ class _DevelopmentRun:
         await self.stage(S.ANALYZING_REQUIREMENTS)
         value = await self.reason({})
         questions = self.strings(value.get("questions"), 5, empty=True)
+        await self.record(
+            "requirements_result",
+            "completed",
+            "Требования проверены",
+            {"sufficient": not questions, "questions_count": len(questions)},
+        )
         if questions:
             if (
                 self.w.service.get(self.task_id).transitions.count(
@@ -275,6 +440,9 @@ class _DevelopmentRun:
             return
         await self.stage(S.PLANNING, questions=())
         plan = self.strings((await self.reason({})).get("steps"), 12)
+        await self.record(
+            "plan_ready", "completed", "План подготовлен", {"steps": len(plan)}
+        )
         await self.stage(S.PREPARING_WORKSPACE, plan=plan)
         await self.operation(W.PREPARE)
         repository_id = None
@@ -333,8 +501,21 @@ class _DevelopmentRun:
                 ):
                     raise DevelopmentFailure("invalid_model_result")
                 if value["approved"]:
+                    await self.record(
+                        "review_result",
+                        "completed",
+                        "Review пройден",
+                        {"approved": True, "findings_count": 0},
+                    )
                     break
+                await self.record(
+                    "review_result",
+                    "failed",
+                    "Review требует исправлений",
+                    {"approved": False, "findings_count": len(findings)},
+                )
                 feedback = "\n".join(findings)
+            await self.finish_step("failed")
             await self.stage(S.FIXING)
             await self.implement(feedback=feedback)
         await self.stage(S.COMMITTING)
@@ -354,6 +535,9 @@ class _DevelopmentRun:
             repository_id,
             False,
             self.w.workspace.execution_backend,
+        )
+        await self.record(
+            "git_commit", "completed", "Коммит создан", {"commit_id": result.commit_id}
         )
         if self.request.publish:
             await self.stage(S.PUSHING)
@@ -378,6 +562,18 @@ class _DevelopmentRun:
     async def execute(self) -> tuple[Message, ...]:
         try:
             await self.workflow()
+            current = self.w.service.get(self.task_id)
+            self.text = (
+                "Нужно уточнить требования. Вопросы доступны в карточке задачи."
+                if current.state is S.WAITING_FOR_CLARIFICATION
+                else "Готово. Проект реализован, команды тестирования и сборки завершились успешно, review пройден, коммит создан."
+            )
+            if (
+                current.result is not None
+                and current.result.execution_backend != "agent"
+            ):
+                self.text += " Проверка выполнена через тестовый адаптер."
+            self.text = observable_text(self.w.secrets.redact(self.text))
             now = datetime.now(UTC)
             return (
                 Message(
@@ -391,6 +587,7 @@ class _DevelopmentRun:
                 if isinstance(error, DevelopmentFailure)
                 else "operation_failed"
             )
+            await self.finish_step("cancelled" if code == "cancelled" else "failed")
             task = self.w.service.get(self.task_id)
             if task.state not in TERMINAL_STATES:
                 self.w.service.transition(
@@ -398,6 +595,17 @@ class _DevelopmentRun:
                     S.CANCELLED if code == "cancelled" else S.FAILED,
                     failure_code=code,
                 )
+            self.phase, self.attempt, self.step_name = "task", 0, None
+            await self.record(
+                "task_status",
+                "cancelled" if code == "cancelled" else "failed",
+                "Задача остановлена",
+                {
+                    "state": self.w.service.get(self.task_id).state.value,
+                    "failure_code": code,
+                },
+                closing=True,
+            )
             raise AgentLifecycleFailure(
                 AgentLifecycleOperation.MESSAGE,
                 AgentLifecycleErrorCode.INTERACTION_FAILED,

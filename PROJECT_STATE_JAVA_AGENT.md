@@ -1,7 +1,30 @@
 # Состояние Java Agent
 
-Дата: 2026-09-20. Принятый baseline:
-`fc601e0f930382c2e6989f4889e01f408993540e`.
+Дата: 2026-09-21. Baseline Java workflow:
+`3d5cabe5325b57b2160e4e6fb52b74e7e9a3b472` (ранее закоммичен и отправлен).
+Принятый streaming baseline: `fc601e0f930382c2e6989f4889e01f408993540e`.
+
+## Observability
+
+Реализован единый bounded trace DevelopmentTask. Development AG-UI выдаёт
+официальные STEP/CUSTOM и финальную сводку; phase JSON не попадает в текстовый
+поток. `/trace` возвращает тот же журнал, включая errors/fix/cancel и реальные
+file/build/commit outcomes. Обычный chat, debug-report и files совместимы.
+Read-only port `/llm-turns` предоставляет безопасные завершённые Qwen turns,
+telemetry и pagination. Transcript считается недоверенным, hidden reasoning,
+system prompt и raw tool/environment данные исключаются до HTTP boundary.
+Контракты: `docs/DEVELOPMENT_OBSERVABILITY.md`; Postman обновлён.
+
+LOCAL_VERIFIED: 51 targeted tests, полный набор **126 Python tests** и
+**74 Node tests**. Проверен реальный exit code bounded runner и совместимость
+со старым helper (неизвестный exit_code=null). Сборка образа локально не запускалась.
+
+По сообщению пользователя baseline Java image/Kata/READY/Qwen/обычный streaming
+уже проверены на сервере. Новая observability остаётся
+SERVER_VERIFICATION_REQUIRED; точные команды — проверка 10 SERVER_VERIFICATION.md.
+Серверный намеренный `.dockerignore` diff находится только на сервере; локальный
+файл этой задачей не менялся. Сфера Код и credentials integration не изменялись.
+GitHub CI/status checks не запускались.
 
 ## Выполнено
 

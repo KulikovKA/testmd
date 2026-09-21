@@ -8,6 +8,7 @@
   "variable": [
     { "key": "base_url", "value": "http://127.0.0.1:8080" },
     { "key": "agent_id", "value": "" },
+    { "key": "task_id", "value": "" },
     { "key": "thread_id", "value": "postman-thread-1" },
     { "key": "run_id", "value": "postman-run-1" },
     { "key": "skill_id", "value": "uploaded-skill" }
@@ -154,6 +155,47 @@
         },
         "url": "{{base_url}}/ag-ui/agents/{{agent_id}}/run"
       }
+    },
+    {
+      "name": "Create Java Development Agent",
+      "event": [{ "listen": "test", "script": { "exec": ["pm.collectionVariables.set('agent_id', pm.response.json().agent_id);"] } }],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\"request_id\":\"java-{{$guid}}\",\"skills\":[\"requirements-clarification\",\"development-planning\",\"java-project-setup\",\"java-implementation\",\"java-testing\",\"code-review\"],\"tools\":[]}" },
+        "url": "{{base_url}}/agents",
+        "description": "После создания выполнить Start Agent. Требуется UAR_JAVA_DEVELOPMENT_ENABLED=true."
+      }
+    },
+    {
+      "name": "Create Java Development Task",
+      "event": [{ "listen": "test", "script": { "exec": ["pm.collectionVariables.set('task_id', pm.response.json().task_id);"] } }],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\"specification\":\"Создай библиотеку Java 21 Calculator.add(int,int) и JUnit 5 тесты для положительных, отрицательных чисел и нуля. Добавь Maven build и .gitignore. Без внешних сервисов.\",\"build_system\":\"maven\",\"branch\":\"main\",\"publish\":false,\"max_fix_attempts\":2}" },
+        "url": "{{base_url}}/agents/{{agent_id}}/development-tasks"
+      }
+    },
+    {
+      "name": "AG-UI Development Run (SSE)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Accept", "value": "text/event-stream" }],
+        "body": { "mode": "raw", "raw": "{\"threadId\":\"{{thread_id}}\",\"runId\":\"{{$guid}}\"}" },
+        "url": "{{base_url}}/ag-ui/development-tasks/{{task_id}}/run",
+        "description": "Проверка AG-UI protocol/E2E. Для диагностики использовать Development Trace и Agent LLM Turns."
+      }
+    },
+    {
+      "name": "Development Trace",
+      "request": { "method": "GET", "url": "{{base_url}}/development-tasks/{{task_id}}/trace",
+        "description": "Состояние и единый журнал фактических workflow событий, включая failed/cancelled и повторные попытки." }
+    },
+    {
+      "name": "Agent LLM Turns",
+      "request": { "method": "GET", "url": "{{base_url}}/agents/{{agent_id}}/llm-turns?after=0&limit=10",
+        "description": "Завершённые native Qwen turns: безопасный current prompt, конечный observable assistant и доступная telemetry. При активном turn возможен 409; продолжение страницы через next_after." }
     },
     {
       "name": "Legacy committed SSE",

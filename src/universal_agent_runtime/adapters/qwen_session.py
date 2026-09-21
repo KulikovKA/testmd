@@ -16,6 +16,7 @@ from uuid import UUID, uuid4
 import docker
 from docker.errors import DockerException, ImageNotFound
 
+from universal_agent_runtime.adapters.qwen_observability import project_turns
 from universal_agent_runtime.application.ports.interaction_errors import (
     InteractionErrorCode as Code,
 )
@@ -33,6 +34,10 @@ from universal_agent_runtime.application.ports.interaction_values import (
     SessionReference,
     TurnRequest,
     TurnResult,
+)
+from universal_agent_runtime.application.ports.llm_turns import (
+    LLMTurnsFailure,
+    LLMTurnsPage,
 )
 from universal_agent_runtime.application.text_stream import (
     StreamingRedactor as _StreamingRedactor,
@@ -1210,6 +1215,78 @@ class QwenSessionAdapter:
 
     async def debug_snapshot(self, reference: SessionReference) -> SessionDebugSnapshot:
         return await asyncio.to_thread(self._debug_snapshot_sync, reference)
+
+    def _llm_turns_sync(
+        self, reference: SessionReference, after: int, limit: int
+    ) -> LLMTurnsPage:
+        marker = self._agent_directory(reference) / ".turn-in-progress"
+        if marker.exists():
+            raise LLMTurnsFailure("llm_turns_busy")
+        try:
+            state = self._load_state(reference, Op.INSPECT)
+        except InteractionFailure as error:
+            raise LLMTurnsFailure(
+                "llm_session_not_found"
+                if error.code is Code.NOT_FOUND
+                else "llm_transcript_invalid"
+            ) from None
+        try:
+            history_path = self._history_path(reference)
+            if history_path.stat().st_size > self._config.max_transcript_bytes:
+                raise LLMTurnsFailure("llm_turns_limit")
+            history = self._read_history(state, Op.INSPECT)
+            transcript = self._transcript(state, Op.INSPECT)
+            if transcript is None:
+                return project_turns(
+                    b"",
+                    [],
+                    model=self._config.model,
+                    secrets=self._secret_values(),
+                    metrics_reader=_debug_transcript_summary,
+                    after=after,
+                    limit=limit,
+                )
+            with transcript.open("rb") as source:
+                raw = source.read(self._config.max_transcript_bytes + 1)
+            if len(raw) > self._config.max_transcript_bytes:
+                raise LLMTurnsFailure("llm_turns_limit")
+            secrets = self._secret_values()
+            # Certificate bytes are never projected, even if copied into a text part.
+            ca_path = self._config.sfera_ca_cert_path
+            if ca_path is not None:
+                with ca_path.open("rb") as source:
+                    ca = source.read(65537)
+                if len(ca) > 65536:
+                    raise LLMTurnsFailure("llm_turns_limit")
+                secrets = (*secrets, ca.decode("utf-8"))
+            page = project_turns(
+                raw,
+                [(turn.user, turn.assistant) for turn in history],
+                model=self._config.model,
+                secrets=secrets,
+                metrics_reader=_debug_transcript_summary,
+                after=after,
+                limit=limit,
+            )
+            if marker.exists() or self._load_state(reference, Op.INSPECT) != state:
+                raise LLMTurnsFailure("llm_turns_busy")
+            return page
+        except InteractionFailure as error:
+            code = (
+                "llm_transcript_not_found"
+                if error.code is Code.NOT_FOUND
+                else "llm_turns_limit"
+                if error.code is Code.INCOMPATIBLE_STATE
+                else "llm_transcript_invalid"
+            )
+            raise LLMTurnsFailure(code) from None
+        except (OSError, UnicodeError, ValueError, TypeError, RecursionError):
+            raise LLMTurnsFailure("llm_transcript_invalid") from None
+
+    async def llm_turns(
+        self, reference: SessionReference, *, after: int = 0, limit: int = 10
+    ) -> LLMTurnsPage:
+        return await asyncio.to_thread(self._llm_turns_sync, reference, after, limit)
 
     def _discover_transcript(self, state: _SessionState) -> Path:
         home = self._qwen_home(state.reference).resolve()

@@ -174,7 +174,8 @@ class DevelopmentWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.fix_attempts, 2)
         self.assertEqual(result.result.checks, ("fake-test", "fake-package"))
         self.assertEqual(events[-1]["type"], "RUN_FINISHED")
-        self.assertGreater(sum("delta" in e for e in events), 20)
+        self.assertGreater(sum(e["type"] == "CUSTOM" for e in events), 20)
+        self.assertEqual(sum("delta" in e for e in events), 1)
         self.assertEqual(
             "".join(e["delta"] for e in events if "delta" in e),
             turn.task.result()[1].content,
@@ -217,7 +218,7 @@ class DevelopmentWorkflowTests(unittest.IsolatedAsyncioTestCase):
         workflow, agent_id, _, _ = workflow_fixture(self.root, workspace=workspace)
         task = workflow.create(DevelopmentRequest(agent_id, "Java library"))
         turn = workflow.begin(task.task_id)
-        turn.deltas.detach()
+        turn.progress.detach()
         await asyncio.wait_for(workspace.entered.wait(), 5)
         workflow.service.cancel(task.task_id)
         self.assertFalse(turn.task.done())

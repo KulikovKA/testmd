@@ -117,6 +117,7 @@ class WorkspaceResult:
     commit_id: str | None = None
     files: tuple[ProjectFile, ...] = ()
     check: str | None = None
+    exit_code: int | None = None
 
 
 class DevelopmentWorkspacePort(Protocol):

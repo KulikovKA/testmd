@@ -96,6 +96,21 @@ class DevelopmentHttpTests(unittest.TestCase):
                 )
                 self.assertEqual(len(completed["result"]["commit_id"]), 40)
                 self.assertNotIn("specification", completed)
+                trace = client.get(f"/development-tasks/{task_id}/trace")
+                self.assertEqual(trace.status_code, 200)
+                self.assertEqual(trace.json()["state"], "COMPLETED")
+                all_events = events + existing_http._events(result.text)
+                self.assertEqual(
+                    trace.json()["events"],
+                    [e["value"] for e in all_events if e["type"] == "CUSTOM"],
+                )
+                self.assertEqual(
+                    [e["sequence"] for e in trace.json()["events"]],
+                    list(range(1, len(trace.json()["events"]) + 1)),
+                )
+                self.assertEqual(
+                    client.get("/development-tasks/missing/trace").status_code, 404
+                )
                 self.assertEqual(
                     client.post(f"/development-tasks/{task_id}/cancel").json()["state"],
                     "COMPLETED",

@@ -93,6 +93,15 @@ async def ag_ui_events(
 ) -> AsyncGenerator[bytes, None]:
     """Emit a standard AG-UI lifecycle around the single application-owned turn."""
 
+    if turn.progress is not None:
+        events = _development_events(turn, thread_id, run_id, heartbeat_seconds)
+        try:
+            async for frame in events:
+                yield frame
+        finally:
+            turn.progress.detach()
+            await events.aclose()
+        return
     started = False
     try:
         yield _event({"type": "RUN_STARTED", "threadId": thread_id, "runId": run_id})
@@ -192,6 +201,83 @@ async def ag_ui_events(
             turn.deltas.detach()
 
 
+async def _development_events(
+    turn: AcceptedTurn, thread_id: str, run_id: str, heartbeat_seconds: float
+):
+    """Project application facts to standard STEP/CUSTOM, then final-only text."""
+    assert turn.progress is not None
+
+    def frames(event):
+        value = event.to_dict()
+        if event.type == "phase" and event.status == "started":
+            yield _event({"type": "STEP_STARTED", "stepName": event.step_name})
+        yield _event(
+            {
+                "type": "CUSTOM",
+                "name": "phase_status" if event.type == "phase" else event.type,
+                "value": value,
+            }
+        )
+        if event.type == "phase" and event.status != "started":
+            yield _event({"type": "STEP_FINISHED", "stepName": event.step_name})
+
+    try:
+        yield _event({"type": "RUN_STARTED", "threadId": thread_id, "runId": run_id})
+        while True:
+            if not turn.progress.queue.empty():
+                for frame in frames(turn.progress.queue.get_nowait()):
+                    yield frame
+                continue
+            if turn.task.done():
+                break
+            received = asyncio.create_task(turn.progress.queue.get())
+            try:
+                done, _ = await asyncio.wait(
+                    {turn.task, received},
+                    timeout=heartbeat_seconds,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if received in done:
+                    for frame in frames(received.result()):
+                        yield frame
+                elif not done:
+                    yield b": keep-alive\n\n"
+            finally:
+                if not received.done():
+                    received.cancel()
+                await asyncio.gather(received, return_exceptions=True)
+        try:
+            messages = turn.task.result()
+        except (AgentLifecycleFailure, asyncio.CancelledError):
+            yield _event(
+                {
+                    "type": "RUN_ERROR",
+                    "code": "development_failed",
+                    "message": "Development task did not complete",
+                }
+            )
+            return
+        assistant = messages[1]
+        yield _event(
+            {
+                "type": "TEXT_MESSAGE_START",
+                "messageId": assistant.message_id,
+                "role": "assistant",
+            }
+        )
+        yield _event(
+            {
+                "type": "TEXT_MESSAGE_CONTENT",
+                "messageId": assistant.message_id,
+                "delta": assistant.content,
+            }
+        )
+        yield _event({"type": "TEXT_MESSAGE_END", "messageId": assistant.message_id})
+        yield _event({"type": "RUN_FINISHED", "threadId": thread_id, "runId": run_id})
+    finally:
+        turn.progress.detach()
+
+
 async def ag_ui_error_events(
     *, thread_id: str | None, run_id: str | None, code: str, message: str
 ) -> AsyncGenerator[bytes, None]:
@@ -234,6 +320,8 @@ class AGUIEventResponse(StreamingResponse):
             # Header-send failure must detach even before the first event runs.
             if self._turn is not None and self._turn.deltas is not None:
                 self._turn.deltas.detach()
+            if self._turn is not None and self._turn.progress is not None:
+                self._turn.progress.detach()
             await self._events.aclose()
 
 

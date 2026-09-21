@@ -56,7 +56,7 @@ export function runBounded(argv, cwd, environment, timeoutMs = 120000) {
     child.on("close", (status) => {
       clearTimeout(timer); kill();
       if (failure) rejectPromise(new OperationError(failure));
-      else resolve({ success: status === 0, output });
+      else resolve({ success: status === 0, output, exit_code: status });
     });
   });
 }

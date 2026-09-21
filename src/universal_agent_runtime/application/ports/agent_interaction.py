@@ -12,6 +12,7 @@ from universal_agent_runtime.application.ports.interaction_values import (
     TurnRequest,
     TurnResult,
 )
+from universal_agent_runtime.application.ports.llm_turns import LLMTurnsPage
 
 
 class AgentInteraction(Protocol):
@@ -45,6 +46,15 @@ class AgentDebugReader(Protocol):
     async def debug_snapshot(
         self, reference: SessionReference
     ) -> SessionDebugSnapshot: ...
+
+
+@runtime_checkable
+class AgentLLMTurnsReader(Protocol):
+    """Return only allowlisted, redacted committed turns; never raw native state."""
+
+    async def llm_turns(
+        self, reference: SessionReference, *, after: int = 0, limit: int = 10
+    ) -> LLMTurnsPage: ...
 
 
 @runtime_checkable

@@ -4,6 +4,7 @@ import json
 import re
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from datetime import datetime
 from typing import Annotated, Any, Literal, cast
 from urllib.parse import urlsplit
@@ -36,6 +37,10 @@ from universal_agent_runtime.application.ports.interaction_errors import (
 )
 from universal_agent_runtime.application.ports.interaction_values import (
     SessionDebugSnapshot,
+)
+from universal_agent_runtime.application.ports.llm_turns import (
+    MAX_TURNS_PAGE,
+    LLMTurnsFailure,
 )
 from universal_agent_runtime.application.ports.runtime_values import OperationOptions
 from universal_agent_runtime.application.ports.skill_store import (
@@ -790,6 +795,33 @@ def create_application(composition: ApplicationComposition) -> FastAPI:
             else WorkspaceInventory(False)
         )
         return AgentFilesResponse.from_inventory(record, inventory)
+
+    @app.get("/agents/{agent_id}/llm-turns")
+    async def agent_llm_turns(
+        agent_id: AgentPath,
+        after: int = Query(default=0, ge=0),
+        limit: int = Query(default=10, ge=1, le=MAX_TURNS_PAGE),
+    ):
+        record = lifecycle.inspect(AgentId(agent_id))
+        try:
+            if composition.llm_turns_reader is None:
+                raise LLMTurnsFailure("llm_turns_unavailable")
+            page = await composition.llm_turns_reader.llm_turns(
+                record.session, after=after, limit=limit
+            )
+            return {"agent_id": agent_id, **asdict(page)}
+        except LLMTurnsFailure as failure:
+            codes = {
+                "llm_turns_unavailable": 503,
+                "llm_turns_busy": 409,
+                "llm_session_not_found": 404,
+                "llm_transcript_not_found": 404,
+                "llm_transcript_invalid": 502,
+                "llm_turns_limit": 413,
+            }
+            return _error(
+                codes[failure.code], failure.code, "LLM turns are unavailable"
+            )
 
     @app.post(
         "/agents/{agent_id}/start",

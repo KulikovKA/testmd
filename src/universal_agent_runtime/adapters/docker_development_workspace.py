@@ -67,12 +67,20 @@ def workspace_result(raw: bytes, secrets: SecretPolicyPort) -> WorkspaceResult:
         output = value.get("output", "")
         if not isinstance(output, str):
             raise TypeError
+        exit_code = value.get("exit_code")
+        if exit_code is not None and (
+            type(exit_code) is not int
+            or not 0 <= exit_code <= 255
+            or value["success"] != (exit_code == 0)
+        ):
+            raise ValueError
         return WorkspaceResult(
             value["success"],
             secrets.redact(output),
             value.get("commit_id"),
             files,
             value.get("check"),
+            exit_code,
         )
     except (TypeError, ValueError, UnicodeError):
         raise DevelopmentFailure("operation_failed") from None

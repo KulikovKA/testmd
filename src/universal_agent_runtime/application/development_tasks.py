@@ -1,5 +1,6 @@
 """Task admission and ownership using the existing Agent lifecycle records."""
 
+import json
 from dataclasses import replace
 from uuid import uuid4
 
@@ -15,6 +16,11 @@ from universal_agent_runtime.domain.development_task import (
     DevelopmentRequest,
     DevelopmentState,
     DevelopmentTask,
+)
+from universal_agent_runtime.domain.development_trace import (
+    MAX_TRACE_BYTES,
+    MAX_TRACE_EVENTS,
+    DevelopmentTraceEvent,
 )
 from universal_agent_runtime.domain.identifiers import validate_identifier
 
@@ -112,4 +118,35 @@ class DevelopmentTaskService:
             updated = replace(task, cancel_requested=True, version=task.version + 1)
             self.tasks.save(updated, expected_version=task.version)
             return updated
-        return self.transition(task_id, DevelopmentState.CANCELLED)
+        self.transition(task_id, DevelopmentState.CANCELLED)
+        self.record(
+            task_id,
+            type="task_status",
+            phase="task",
+            status="cancelled",
+            step_name=None,
+            attempt=0,
+            summary="Задача отменена",
+            data_json='{"state":"CANCELLED"}',
+            closing=True,
+        )
+        return self.get(task_id)
+
+    def record(
+        self, task_id: str, *, closing: bool = False, **values
+    ) -> DevelopmentTraceEvent:
+        task = self.get(task_id)
+        event = DevelopmentTraceEvent(sequence=len(task.trace) + 1, **values)
+        limit = MAX_TRACE_EVENTS if closing else MAX_TRACE_EVENTS - 8
+        bytes_limit = MAX_TRACE_BYTES if closing else MAX_TRACE_BYTES - 8 * 16384
+        size = sum(
+            len(json.dumps(e.to_dict(), ensure_ascii=False).encode())
+            for e in (*task.trace, event)
+        )
+        if len(task.trace) >= limit or size > bytes_limit:
+            raise DevelopmentFailure("output_limit")
+        self.tasks.save(
+            replace(task, trace=(*task.trace, event), version=task.version + 1),
+            expected_version=task.version,
+        )
+        return event

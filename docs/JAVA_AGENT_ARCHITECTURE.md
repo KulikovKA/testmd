@@ -104,11 +104,16 @@ Java 21/Maven/Gradle локально не меняет production architecture.
 StreamingAgentInteraction. История Qwen фиксируется по успешным authoritative
 результатам отдельных turns. DevelopmentTask имеет отдельный structured result.
 
-Прогресс задачи использует тот же `TurnDeltas`, `AcceptedTurn`, `ag_ui_events` и
-`AGUIEventResponse`. Сообщение прогресса задачи — временный журнал стадий, а не
-дополнительная запись в conversation history; его итог точно совпадает с
-отправленными дельтами. События остаются стандартными AG-UI text/run events.
+Прогресс задачи использует тот же ограниченный канал `TurnDeltas`, `AcceptedTurn`,
+`ag_ui_events` и `AGUIEventResponse`. С 2026-09-21 единый журнал DevelopmentTask
+питает REST `/trace` и стандартные AG-UI STEP/CUSTOM events. Phase JSON Qwen
+не становится пользовательским текстом. TEXT_MESSAGE_* содержит только итоговую
+сводку; обычный Agent chat сохраняет прежний incremental text stream.
 Disconnect отсоединяет потребителя, но не отменяет принадлежащую приложению работу.
+
+Read-only port `AgentLLMTurnsReader` предоставляет ограниченную безопасную
+проекцию native transcript через Qwen adapter. Контракты frontend, лимиты и
+ошибки описаны в [DEVELOPMENT_OBSERVABILITY.md](DEVELOPMENT_OBSERVABILITY.md).
 
 Для защиты от параллельного chat/stop/delete используется отметка владельца
 development task в Agent record и проверка admission. Это расширение lifecycle,
@@ -184,7 +189,7 @@ execution_backend. Только backend `agent` означает вызов prod
 Проверенные локально ограничения: одна операция helper — 120 секунд, до 64 KiB
 вывода процесса; до 64 предлагаемых файлов за turn, 32 KiB текста на файл,
 256 файлов и 128 KiB текста при inventory. Контекст одного Qwen turn ограничен
-16 384 символами, общий журнал задачи — 128 Ki символов. Превышение возвращает
+16 384 символами, structured trace — 512 событиями и 512 KiB. Превышение возвращает
 контролируемую ошибку; большие проекты пока требуют отдельного проектирования.
 Бинарные предложения модели не поддерживаются. Существующий
 `gradle/wrapper/gradle-wrapper.jar` допускается до 1 MiB, не передаётся модели и

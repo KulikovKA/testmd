@@ -8,6 +8,10 @@ Orchestrator запускается вручную через `nohup`; systemd �
 не читал и не выводил `.env`, не добавлял credentials.
 Все серверные проверки: **SERVER_VERIFICATION_REQUIRED**.
 Фактические результаты заполняются только после выполнения на сервере.
+2026-09-21 пользователь сообщил, что baseline `3d5cabe` уже проверен:
+Java image/Kata, READY, Qwen, обычный AG-UI incremental streaming и Java Skills.
+Это сведения пользователя, не результаты запуска агентом. Новые observability
+endpoints и STEP/CUSTOM streaming требуют отдельной проверки 10.
 
 ## Локальная граница
 
@@ -316,7 +320,9 @@ for build in ('maven', 'gradle'):
     assert events[-1]['type'] == 'RUN_FINISHED'
     assert not any(e['type'] == 'RUN_ERROR' for e in events)
     deltas = [e['delta'] for e in events if e['type'] == 'TEXT_MESSAGE_CONTENT']
-    assert len(deltas) > 5
+    assert len(deltas) == 1  # Development выдаёт только финальную сводку.
+    assert any(e['type'] == 'STEP_STARTED' for e in events)
+    assert any(e['type'] == 'CUSTOM' for e in events)
     assert result['result']['execution_backend'] == 'agent'
     assert result['result']['published'] is False
     assert len(result['result']['checks']) == 2
@@ -355,11 +361,11 @@ docker exec --user 10001:10001 "$CONTAINER_ID" node -e \
 Ожидается: runtime kata, UID/GID 10001, Java 21; build и тесты действительно
 прошли, XML содержит ненулевое число тестов без failures/errors; native HEAD
 совпадает с result.commit_id; рабочее дерево чистое; присутствуют промежуточные
-AG-UI дельты. При неудаче записать безопасный failure_code и состояние, не
+AG-UI STEP/CUSTOM события. При неудаче записать безопасный failure_code и состояние, не
 выводить environment, Qwen native state, cookies или credentials.
 
 Для disconnect использовать отдельную такую же задачу и оборвать `curl -N`
-после первых TEXT_MESSAGE_CONTENT. Затем GET должен показать продолжение до
+после первых STEP/CUSTOM событий. Затем GET должен показать продолжение до
 COMPLETED/FAILED без зависания очереди. Для cancellation на отдельной задаче
 выполнить `POST /development-tasks/$TASK_ID/cancel` во время TESTING: до
 завершения операции владелец Agent сохраняется, затем состояние CANCELLED и
@@ -383,6 +389,141 @@ COMPLETED/FAILED без зависания очереди. Для cancellation �
 согласования доверенного broker. Не помещать их в DTO, Agent или Skills.
 `UAR_REPOSITORY_ALLOWED_HOSTS` не разрешает authenticated transport и не открывает
 firewall. Изменения security boundary требуют отдельного согласования.
+
+Фактический результат: PENDING SERVER VERIFICATION
+
+## Проверка 10. Development observability: live, trace, LLM turns
+
+Статус: SERVER_VERIFICATION_REQUIRED. Причина: реальный Qwen transcript и
+Java/Kata runtime находятся на 10.228.64.200. Локально проверены fixtures,
+test clients, временный Git и протокол; новый server E2E не запускался.
+
+Компоненты: `development_trace.py`, `development_tasks.py`,
+`development_workflow.py`, `ag_ui.py`, `development_http.py`, `http_api.py`,
+`qwen_observability.py`, `qwen_session.py`, read-only interaction port,
+`composition.py`, `workspace-operations.mjs` (фактический exit_code).
+Контракт frontend: `docs/DEVELOPMENT_OBSERVABILITY.md`.
+
+Серверный локальный фикс `agent_image/.dockerignore` сохранить. В этой задаче
+файл не менялся. Перед доставкой новой версии сделать резервную копию только
+этого diff, затем убедиться, что изменение сохранилось. Не применять к нему
+checkout/reset/restore. Доставка изменений и выполнение команд ниже — оператором.
+
+```bash
+cd /home/kkulikov/universal-agent-runtime-sd2
+git status --short -- agent_image/.dockerignore
+git diff --binary -- agent_image/.dockerignore > /tmp/uar-sd2-dockerignore-observability.patch
+# После доставки новой версии повторить проверку: локальный фикс должен остаться.
+git diff -- agent_image/.dockerignore
+bash ./build-agent-image.sh uar-agent:observability-sd2
+```
+
+Для обновления exit_code нужен свежий image; старый возвращает null, что
+сохраняет совместимость. После завершения активных задач перезапустить только
+подтверждённый Orchestrator PID. Реестры в памяти будут потеряны. Выполнить в
+отдельном Bash shell; `.env` загружает оператор, содержимое не выводится.
+
+```bash
+cd /home/kkulikov/universal-agent-runtime-sd2
+set -e
+set -o pipefail
+ss -ltnp 'sport = :8080'
+read -r -p 'PID Orchestrator из ss (пусто, если порт свободен): ' UAR_OLD_PID
+if [ -n "$UAR_OLD_PID" ]; then
+  case "$UAR_OLD_PID" in *[!0-9]*) exit 1 ;; esac
+  case "$(ps -p "$UAR_OLD_PID" -o args=)" in
+    *universal_agent_runtime.http_api:create_application_from_environment*) kill -TERM "$UAR_OLD_PID" ;;
+    *) printf '%s\n' 'PID не подтверждён как UAR Orchestrator'; exit 1 ;;
+  esac
+  for UAR_WAIT in $(seq 1 30); do
+    kill -0 "$UAR_OLD_PID" 2>/dev/null || break
+    sleep 1
+  done
+  if kill -0 "$UAR_OLD_PID" 2>/dev/null; then
+    printf '%s\n' 'Процесс ещё работает; новый Orchestrator не запущен'; exit 1
+  fi
+fi
+set -a
+. ./.env
+set +a
+export UAR_JAVA_DEVELOPMENT_ENABLED=true
+export UAR_DOCKER_WORKLOAD_IMAGE=uar-agent:observability-sd2
+nohup bash ./run-orchestrator.sh > /tmp/uar-orchestrator-sd2.log 2>&1 &
+export BASE_URL=http://127.0.0.1:8080
+for UAR_WAIT in $(seq 1 30); do
+  curl --fail -sS "$BASE_URL/readyz" && break
+  sleep 1
+done
+curl --fail -sS "$BASE_URL/readyz"
+```
+
+Создать и запустить свежий Agent, создать development task без repository:
+
+```bash
+export AGENT_ID=$(curl --fail -sS -H 'Content-Type: application/json' \
+  -d "{\"request_id\":\"obs-$(date +%s)\",\"skills\":[\"requirements-clarification\",\"development-planning\",\"java-project-setup\",\"java-implementation\",\"java-testing\",\"code-review\"],\"tools\":[]}" \
+  "$BASE_URL/agents" | .venv/bin/python -c 'import json,sys; print(json.load(sys.stdin)["agent_id"])')
+curl --fail -sS -X POST "$BASE_URL/agents/$AGENT_ID/start"
+export TASK_ID=$(curl --fail -sS -H 'Content-Type: application/json' \
+  -d '{"specification":"Создай Java 21 библиотеку Calculator.add(int,int), JUnit 5 тесты для положительных, отрицательных чисел и нуля, Maven configuration и .gitignore. Без внешних сервисов и публикации. Остальные решения выбери самостоятельно.","build_system":"maven","branch":"main","publish":false,"max_fix_attempts":2}' \
+  "$BASE_URL/agents/$AGENT_ID/development-tasks" \
+  | .venv/bin/python -c 'import json,sys; print(json.load(sys.stdin)["task_id"])')
+printf 'AGENT_ID=%s\nTASK_ID=%s\n' "$AGENT_ID" "$TASK_ID"
+curl --fail -N -H 'Content-Type: application/json' -H 'Accept: text/event-stream' \
+  -d "{\"threadId\":\"$TASK_ID\",\"runId\":\"obs-$(date +%s)\"}" \
+  "$BASE_URL/ag-ui/development-tasks/$TASK_ID/run" | tee /tmp/uar-observability-run.sse
+curl --fail -sS "$BASE_URL/development-tasks/$TASK_ID/trace" | tee /tmp/uar-observability-trace.json
+curl --fail -sS "$BASE_URL/agents/$AGENT_ID/llm-turns?after=0&limit=10"
+```
+
+При WAITING_FOR_CLARIFICATION выполнить clarification из проверки 8 и новый
+run. RUN_FINISHED завершает запуск, состояние задачи при этом может быть waiting.
+Для Gradle повторить создание свежего Agent/task с build_system=gradle и
+соответствующим ТЗ. Команды с credentials и доступ к Сфера Код здесь не нужны.
+
+Независимая сверка live и trace одного запуска, без повторного запуска workflow:
+
+```bash
+.venv/bin/python - <<'PY'
+import json
+from pathlib import Path
+events = [json.loads(line[6:]) for line in Path('/tmp/uar-observability-run.sse').read_text().splitlines() if line.startswith('data: ')]
+trace = json.loads(Path('/tmp/uar-observability-trace.json').read_text())
+facts = [e['value'] for e in events if e['type'] == 'CUSTOM']
+assert facts == trace['events'][-len(facts):]
+assert events[0]['type'] == 'RUN_STARTED'
+assert trace['state'] == 'COMPLETED', trace['failure_code']
+assert events[-1]['type'] == 'RUN_FINISHED'
+active = None
+for event in events:
+    if event['type'] == 'STEP_STARTED':
+        assert active is None
+        active = event['stepName']
+    elif event['type'] == 'STEP_FINISHED':
+        assert event['stepName'] == active
+        active = None
+assert active is None
+text = [e['delta'] for e in events if e['type'] == 'TEXT_MESSAGE_CONTENT']
+assert len(text) == 1 and '"files"' not in text[0]
+commands = [e for e in facts if e['type'] == 'command_finished']
+assert commands and all(e['data']['exit_code'] is not None for e in commands)
+print('STEP/CUSTOM, trace, final summary и реальные exit codes проверены')
+PY
+```
+
+Ожидается: требования → план → файлы → test/package → review → commit,
+парные STEP, корректные attempt при fix-loop, идентичные CUSTOM и REST записи.
+В TEXT_MESSAGE_CONTENT нет phase JSON; /llm-turns показывает current messages,
+конечный видимый assistant, корректный порядок и доступную numeric telemetry.
+System prompt/reasoning/raw environment/tool payload отсутствуют. Не выводить
+реальные secrets для проверки; использовать только синтетический canary в
+отдельной тестовой конфигурации.
+
+Повторить disconnect после STEP_STARTED на отдельной задаче: GET /trace должен
+продолжать обновляться. /llm-turns во время native turn может ответить безопасным
+409; повторить после завершения. Проверку secret redaction и malformed transcript
+локальные fixtures подтверждают без порчи настоящего рабочего transcript.
+GitHub CI/status checks здесь не запускались; LOCAL_VERIFIED не означает CI green.
 
 Фактический результат: PENDING SERVER VERIFICATION
 

@@ -4,6 +4,7 @@ import asyncio
 import time
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from typing import Generic, TypeVar
 from uuid import uuid4
 
 from universal_agent_runtime.application.agent_lifecycle import (
@@ -34,6 +35,7 @@ from universal_agent_runtime.application.ports.interaction_values import (
 from universal_agent_runtime.application.text_stream import redact_text
 from universal_agent_runtime.benchmarking import emit_benchmark_metric
 from universal_agent_runtime.domain.agent import AgentLifecycleState as State
+from universal_agent_runtime.domain.development_trace import DevelopmentTraceEvent
 from universal_agent_runtime.domain.identifiers import AgentId
 from universal_agent_runtime.domain.message import Message
 
@@ -77,16 +79,22 @@ class AcceptedTurn:
     task: asyncio.Task[tuple[Message, ...]] = field(repr=False)
     assistant_message_id: str = ""
     deltas: "TurnDeltas | None" = field(default=None, repr=False)
+    progress: "TurnDeltas[DevelopmentTraceEvent] | None" = field(
+        default=None, repr=False
+    )
 
 
-class TurnDeltas:
+T = TypeVar("T")
+
+
+class TurnDeltas(Generic[T]):
     """Bounded provisional channel; detaching the client unblocks inference."""
 
     def __init__(self) -> None:
-        self.queue: asyncio.Queue[AssistantTextDelta] = asyncio.Queue(maxsize=16)
+        self.queue: asyncio.Queue[T] = asyncio.Queue(maxsize=16)
         self._detached = asyncio.Event()
 
-    async def emit(self, delta: AssistantTextDelta) -> None:
+    async def emit(self, delta: T) -> None:
         if self._detached.is_set():
             return
         put = asyncio.create_task(self.queue.put(delta))

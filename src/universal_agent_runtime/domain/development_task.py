@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass, field, replace
 from enum import Enum
 
+from universal_agent_runtime.domain.development_trace import DevelopmentTraceEvent
 from universal_agent_runtime.domain.identifiers import AgentId, validate_identifier
 
 
@@ -182,6 +183,7 @@ class DevelopmentTask:
     result: DevelopmentResult | None = None
     failure_code: str | None = None
     cancel_requested: bool = False
+    trace: tuple[DevelopmentTraceEvent, ...] = ()
 
     def __post_init__(self) -> None:
         validate_identifier(self.task_id)

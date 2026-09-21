@@ -63,6 +63,12 @@ test("hard-linked project files cannot overwrite an external file", () => fixtur
 }));
 
 test("execution timeout and output limits are enforced without shell", async () => {
+  const failed = await runBounded([process.execPath, "-e", "process.exit(7)"], os.tmpdir(), {}, 3000);
+  assert.equal(failed.success, false);
+  assert.equal(failed.exit_code, 7);
+  const passed = await runBounded([process.execPath, "-e", "process.stdout.write('ok')"], os.tmpdir(), {}, 3000);
+  assert.equal(passed.success, true);
+  assert.equal(passed.exit_code, 0);
   await assert.rejects(runBounded([process.execPath, "-e", "setTimeout(()=>{}, 10000)"], os.tmpdir(), {}, 30), /operation_timeout/);
   await assert.rejects(runBounded([process.execPath, "-e", "process.stdout.write('x'.repeat(100000))"], os.tmpdir(), {}, 3000), /output_limit/);
 });

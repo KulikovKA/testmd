@@ -46,6 +46,7 @@ from universal_agent_runtime.application.development_workflow import Development
 from universal_agent_runtime.application.ports.agent_interaction import (
     AgentDebugReader,
     AgentInteraction,
+    AgentLLMTurnsReader,
 )
 from universal_agent_runtime.application.ports.agent_repository import AgentRepository
 from universal_agent_runtime.application.ports.agent_runtime import AgentRuntime
@@ -84,6 +85,7 @@ class ApplicationComposition:
     skills: SkillManagementService | None = None
     skill_catalog: SkillPackageCatalog | None = None
     debug_reader: AgentDebugReader | None = None
+    llm_turns_reader: AgentLLMTurnsReader | None = None
     workspace_reader: WorkspaceInventoryReader | None = None
     development: DevelopmentWorkflow | None = None
     development_workspace: DevelopmentWorkspacePort | None = None
@@ -202,6 +204,9 @@ def compose_application(
         development=development,
         development_workspace=development_workspace,
         debug_reader=interaction if isinstance(interaction, AgentDebugReader) else None,
+        llm_turns_reader=interaction
+        if isinstance(interaction, AgentLLMTurnsReader)
+        else None,
         workspace_reader=(
             runtime if isinstance(runtime, WorkspaceInventoryReader) else None
         ),
