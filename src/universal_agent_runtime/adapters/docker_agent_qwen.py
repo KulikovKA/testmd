@@ -347,15 +347,22 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
         )
 
     def _task_environment(self, operations: tuple[str, ...]) -> dict[str, str]:
+        result = {}
+        if self._config.sfera_ca_cert_path is not None:
+            result["NODE_EXTRA_CA_CERTS"] = (
+                self._config.sfera_ca_cert_container_path
+            )
         if not operations or self._config.sfera_base_url is None:
-            return {}
-        result = {
+            return result
+        result.update({
             "UAR_SFERA_BASE_URL": self._config.sfera_base_url,
             "UAR_SFERA_TIMEOUT_MS": str(
                 round(self._config.sfera_timeout_seconds * 1000)
             ),
-            "UAR_SFERA_MAX_RESPONSE_BYTES": str(self._config.sfera_max_response_bytes),
-        }
+            "UAR_SFERA_MAX_RESPONSE_BYTES": str(
+                self._config.sfera_max_response_bytes
+            ),
+        })
         if self._config.sfera_username is not None:
             result["UAR_SFERA_USERNAME"] = self._config.sfera_username
             result["UAR_SFERA_PASSWORD"] = self._config.sfera_password or ""
@@ -364,8 +371,6 @@ class DockerAgentQwenRunner(DockerQwenCommandRunner):
             and self._config.sfera_default_owner is not None
         ):
             result["UAR_SFERA_DEFAULT_OWNER"] = self._config.sfera_default_owner
-        if self._config.sfera_ca_cert_path is not None:
-            result["NODE_EXTRA_CA_CERTS"] = self._config.sfera_ca_cert_container_path
         return result
 
     def _receive(self, invocation: QwenInvocation, chunks: object) -> None:

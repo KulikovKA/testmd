@@ -48,7 +48,6 @@ JAVA_SKILLS = (
     "development-planning",
     "java-project-setup",
     "java-implementation",
-    "java-testing",
     "code-review",
 )
 
@@ -505,48 +504,8 @@ class _DevelopmentRun:
             await self.operation(W.INIT)
         await self.stage(S.IMPLEMENTING)
         await self.implement()
+        # Code-only mode: skip build, tests, review and fixing.
         checks = ()
-        while True:
-            await self.stage(S.TESTING)
-            checked = []
-            feedback = ""
-            for operation in (W.TEST, W.PACKAGE):
-                result = await self.operation(operation)
-                if not result.success:
-                    feedback = (
-                        self.w.secrets.redact(result.output)[:4000] or "build failed"
-                    )
-                    break
-                checked.append(result.check or operation.value)
-            if not feedback:
-                checks = tuple(checked)
-                await self.stage(S.REVIEWING)
-                value = await self.reason(
-                    {"files": [asdict(f) for f in await self.files()], "checks": checks}
-                )
-                findings = self.strings(value.get("findings"), 12, empty=True)
-                if type(value.get("approved")) is not bool or value["approved"] == bool(
-                    findings
-                ):
-                    raise DevelopmentFailure("invalid_model_result")
-                if value["approved"]:
-                    await self.record(
-                        "review_result",
-                        "completed",
-                        "Review пройден",
-                        {"approved": True, "findings_count": 0},
-                    )
-                    break
-                await self.record(
-                    "review_result",
-                    "failed",
-                    "Review требует исправлений",
-                    {"approved": False, "findings_count": len(findings)},
-                )
-                feedback = "\n".join(findings)
-            await self.finish_step("failed")
-            await self.stage(S.FIXING)
-            await self.implement(feedback=feedback)
         await self.stage(S.COMMITTING)
         files = await self.files()
         await self.operation(W.STATUS)
@@ -584,7 +543,7 @@ class _DevelopmentRun:
             self.text = (
                 "Нужно уточнить требования. Вопросы доступны в карточке задачи."
                 if current.state is S.WAITING_FOR_CLARIFICATION
-                else "Готово. Проект реализован, команды тестирования и сборки завершились успешно, review пройден, коммит создан."
+                else "Готово. Изменения записаны, коммит создан и задача завершена."
             )
             if (
                 current.result is not None
