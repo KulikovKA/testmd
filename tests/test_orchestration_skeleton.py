@@ -81,26 +81,94 @@ def test_ax_mapping_and_fail_closed():
 
     client = FakeClient()
     adapter = AXOrchestrator(config, client)
-    with pytest.raises(AXUnavailable, match="microvm"):
+    with pytest.raises(AXUnavailable, match="admission"):
         asyncio.run(adapter.submit(worker("worker-1")))
     assert not client.called
 
 
-def test_ax_fake_verified_boundary():
+def test_ax_pre_admission_and_workspace_are_separate_from_actual_attestation():
     class FakeClient:
-        manifest = None
+        called = False
 
         async def update_task(self, manifest):
-            self.manifest = manifest
+            self.called = True
 
-    class FakeVerifier:
-        async def verified_microvm(self, atespace, spec):
+    class Admission:
+        async def verify_admission_policy(self, atespace, spec):
             return atespace == "default" and spec.worker_id == "worker-1"
 
+    class WorkspaceRegistry:
+        ready = True
+
+        async def workspace_is_ready(self, atespace, workspace_name):
+            return self.ready and atespace == "default" and workspace_name == "worker-1-workspace"
+
+    class Attestor:
+        async def attest_task_actor_microvm(self, atespace, task_name):
+            return atespace == "default" and task_name == "worker-1"
+
     client = FakeClient()
-    adapter = AXOrchestrator(AXConfiguration("default", "worker-image", ("serve",)), client, FakeVerifier())
-    assert asyncio.run(adapter.submit(worker("worker-1"))) is WorkerStatus.WAITING
-    assert client.manifest["kind"] == "Task"
+    registry = WorkspaceRegistry()
+    adapter = AXOrchestrator(AXConfiguration("default", "worker-image", ("serve",)), client,
+                             Admission(), Attestor(), registry)
+
+    async def exercise():
+        await adapter.verify_pre_admission(worker("worker-1"))
+        await adapter.attest_post_launch("worker-1")
+        with pytest.raises(AXUnavailable, match="gate worker execution"):
+            await adapter.submit(worker("worker-1"))
+
+    asyncio.run(exercise())
+    assert not client.called
+
+
+def test_ax_rejects_unprovisioned_workspace_before_submission():
+    class Admission:
+        async def verify_admission_policy(self, atespace, spec):
+            return True
+
+    class WorkspaceRegistry:
+        async def workspace_is_ready(self, atespace, workspace_name):
+            return False
+
+    adapter = AXOrchestrator(AXConfiguration("default", "worker-image", ("serve",)),
+                             admission_verifier=Admission(), workspaces=WorkspaceRegistry())
+    with pytest.raises(AXUnavailable, match="Workspace"):
+        asyncio.run(adapter.submit(worker("worker-1")))
+
+
+def test_ax_submission_requires_post_launch_attestor():
+    class FakeClient:
+        called = False
+
+        async def update_task(self, manifest):
+            self.called = True
+
+    class Admission:
+        async def verify_admission_policy(self, atespace, spec):
+            return True
+
+    class WorkspaceRegistry:
+        async def workspace_is_ready(self, atespace, workspace_name):
+            return True
+
+    client = FakeClient()
+    adapter = AXOrchestrator(AXConfiguration("default", "worker-image", ("serve",)), client,
+                             Admission(), workspaces=WorkspaceRegistry())
+    with pytest.raises(AXUnavailable, match="post-launch"):
+        asyncio.run(adapter.submit(worker("worker-1")))
+    assert not client.called
+
+
+def test_ax_post_launch_attestation_fails_closed_when_not_verified():
+    class Attestor:
+        async def attest_task_actor_microvm(self, atespace, task_name):
+            return False
+
+    adapter = AXOrchestrator(AXConfiguration("default", "worker-image", ("serve",)),
+                             placement_attestor=Attestor())
+    with pytest.raises(AXUnavailable, match="actual.*attested"):
+        asyncio.run(adapter.attest_post_launch("worker-1"))
 
 
 def test_legacy_bridge_requires_kata_before_lifecycle_call():
@@ -162,6 +230,115 @@ def test_legacy_bridge_uses_existing_lifecycle_and_chat():
 
     asyncio.run(exercise())
     assert lifecycle.commands[0].request_id == "worker-1"
+
+
+@pytest.mark.parametrize("failure_point", ["start", "chat", "result"])
+def test_legacy_bridge_cleans_failed_attempt_and_allows_retry(failure_point):
+    class FakeLifecycle:
+        def __init__(self):
+            self.commands = []
+            self.states = {}
+            self.deleted = []
+
+        async def create(self, command):
+            self.commands.append(command)
+            agent_id = AgentId(f"agent-{len(self.commands)}")
+            self.states[agent_id] = AgentLifecycleState.STOPPED
+            return SimpleNamespace(agent=SimpleNamespace(agent_id=agent_id))
+
+        async def start(self, agent_id):
+            if failure_point == "start" and len(self.commands) == 1:
+                self.states[agent_id] = AgentLifecycleState.FAILED
+                raise RuntimeError("start failed")
+            self.states[agent_id] = AgentLifecycleState.READY
+
+        def inspect(self, agent_id):
+            return SimpleNamespace(state=self.states[agent_id])
+
+        async def stop(self, agent_id):
+            self.states[agent_id] = AgentLifecycleState.STOPPED
+
+        async def delete(self, agent_id):
+            assert self.states[agent_id] is AgentLifecycleState.STOPPED
+            self.deleted.append(agent_id)
+            del self.states[agent_id]
+
+    class FakeChat:
+        def __init__(self):
+            self.calls = 0
+
+        async def send(self, agent_id, goal):
+            self.calls += 1
+            if failure_point == "chat" and self.calls == 1:
+                raise RuntimeError("chat failed")
+            if failure_point == "result" and self.calls == 1:
+                return (Message("message-1", "turn-1", 1, "user", goal, datetime.now(UTC)),)
+            return (Message("message-2", "turn-2", 2, "assistant", "done", datetime.now(UTC)),)
+
+    lifecycle = FakeLifecycle()
+    adapter = LegacyWorkerOrchestrator(lifecycle, FakeChat(), RuntimeDriver.KATA)
+
+    async def exercise():
+        with pytest.raises(RuntimeError):
+            await adapter.submit(worker("worker-1"))
+        assert AgentId("agent-1") in lifecycle.deleted
+        assert "worker-1" not in adapter._agents
+        assert "worker-1" not in adapter.results
+        assert await adapter.submit(worker("worker-1")) is WorkerStatus.COMPLETED
+
+    asyncio.run(exercise())
+    assert lifecycle.commands[0].request_id != lifecycle.commands[1].request_id
+
+
+def test_legacy_bridge_retries_cleanup_when_initial_cleanup_fails():
+    class FakeLifecycle:
+        def __init__(self):
+            self.states = {}
+            self.creates = 0
+            self.stop_calls = 0
+
+        async def create(self, command):
+            self.creates += 1
+            agent_id = AgentId(f"agent-{self.creates}")
+            self.states[agent_id] = AgentLifecycleState.STOPPED
+            return SimpleNamespace(agent=SimpleNamespace(agent_id=agent_id))
+
+        async def start(self, agent_id):
+            if self.creates == 1:
+                self.states[agent_id] = AgentLifecycleState.FAILED
+                raise RuntimeError("start failed")
+            self.states[agent_id] = AgentLifecycleState.READY
+
+        def inspect(self, agent_id):
+            return SimpleNamespace(state=self.states[agent_id])
+
+        async def stop(self, agent_id):
+            self.stop_calls += 1
+            if self.stop_calls == 1:
+                raise RuntimeError("temporary stop failure")
+            self.states[agent_id] = AgentLifecycleState.STOPPED
+
+        async def delete(self, agent_id):
+            assert self.states[agent_id] is AgentLifecycleState.STOPPED
+            del self.states[agent_id]
+
+    class FakeChat:
+        async def send(self, agent_id, goal):
+            return (Message("message-1", "turn-1", 1, "assistant", "done", datetime.now(UTC)),)
+
+    lifecycle = FakeLifecycle()
+    adapter = LegacyWorkerOrchestrator(lifecycle, FakeChat(), RuntimeDriver.KATA)
+
+    async def exercise():
+        with pytest.raises(RuntimeError, match="start failed"):
+            await adapter.submit(worker("worker-1"))
+        assert "worker-1" in adapter._agents
+        assert adapter._statuses["worker-1"] is WorkerStatus.FAILED
+        assert await adapter.submit(worker("worker-1")) is WorkerStatus.COMPLETED
+        assert "worker-1" not in adapter._agents
+
+    asyncio.run(exercise())
+    assert lifecycle.creates == 2
 
 
 def test_backend_defaults_to_legacy_and_ax_needs_explicit_atespace():

@@ -65,10 +65,11 @@ defines `ax.v1alpha1.AX` with `UpdateTask`, `GetTask`, `WatchTask`,
 command, literal environment values, CPU/memory requests and limits,
 workspace references, and `debug`. `WorkspaceSpec` includes Git, MCP, and
 skill registries; `ModelSpec` includes a secret key reference. The protobuf
-reserves the former Task gateway field and has no Task sandbox class, process
-limit, or secret reference. Its `TaskStatus` has a phase and conditions but
-no command exit result. The [manifest guide](https://github.com/google/ax/blob/main/docs/manifests.md)
-still shows Gateway, so the protobuf is used as the mapping authority. AX
+reserves/removes the former Task gateway field and has no Task sandbox class,
+process limit, or secret reference. Its `TaskStatus` has a phase and conditions
+but no command exit result. The current [manifest guide](https://github.com/google/ax/blob/main/docs/manifests.md)
+covers Task, Workspace, and Model resources and no longer documents Gateway.
+AX
 [design](https://github.com/google/ax/blob/main/DESIGN.md) describes a Redis
 event stream and controllers that reconcile Tasks into Substrate actors.
 
@@ -86,8 +87,8 @@ The locally stable dependency is our own `WorkerOrchestrator` port and
 domain graph. AX resource field names and phase handling are an experimental
 mapping boundary. The adapter creates a Task manifest projection for tests;
 its transport seam is not a gRPC client. The default composition leaves
-that transport and placement verifier absent, so AX submit fails before any
-Task is created.
+that transport, admission verifier, Workspace readiness checker, and
+placement attestor absent, so AX submit fails before any Task is created.
 
 ## Execution lifecycle
 
@@ -101,24 +102,38 @@ Task is created.
    belong above the infrastructure adapter.
 5. In legacy mode, the optional bridge creates a separate Agent, starts it,
    sends the goal through the existing chat turn, and records the response.
-   It refuses new worker execution unless the existing runtime driver is
-   Kata. Legacy suspend and resume are unsupported.
-6. In AX mode, submission requires a server-backed placement verifier and a
-   transport. Neither is wired locally. AX status alone cannot reliably
-   establish that a worker command completed, so result aggregation needs a
-   separate trusted completion protocol in a later phase.
+   On start, chat, or result failure it stops and deletes the Agent before
+   releasing the logical worker ID. If cleanup fails, it retains the Agent
+   reference and retries cleanup before another submission. It refuses new
+   worker execution unless the existing runtime driver is Kata. Legacy
+   suspend and resume are unsupported.
+6. Before an AX Task may be admitted, policy/configuration must be checked and
+   its referenced Workspace must be confirmed provisioned and ready. A
+   `WorkspaceRef.name` is a reference; it does not create a Workspace
+   resource. After launch, a separate attestor must bind the actual AX Task
+   to its Substrate Actor and verify that actor's microVM placement. A
+   pre-admission result cannot prove actual Kata execution. AX submission
+   remains disabled because the current adapter cannot hold the worker before
+   command execution while that post-launch attestation is performed. AX
+   status alone also cannot reliably establish command completion, so result
+   aggregation needs a separate trusted completion protocol.
 
 ## Security, workspaces, skills, Git, and observability
 
 - Every untrusted Qwen worker requires verified Kata/microVM placement. A
-  normal Pod, runc container, or gVisor actor is not a substitute. A verifier
-  must establish the class and its enforcement before allowing AX admission,
-  then attest the actual actor on the server. Until that guarantee exists,
-  AX launch stays disabled. No fallback to Docker/runc is permitted.
+  normal Pod, runc container, or gVisor actor is not a substitute. Pre-admission
+  policy/configuration verification and post-launch attestation of the actual
+  AX Task/Substrate Actor are separate required checks. The latter needs an
+  execution gate that prevents the Qwen command from starting before
+  attestation. Neither check can stand in for the other. Until both checks
+  and that gate exist, AX launch stays disabled. No fallback to Docker/runc
+  is permitted.
 - Each worker gets a distinct logical workspace reference. In legacy mode,
   the existing lifecycle allocates a separate Docker volume and workspace ID.
-  AX Workspaces need a server-side isolation and persistence design before
-  reuse; a shared writable Workspace is unacceptable.
+  In AX mode, the referenced Workspace resource must be created/provisioned
+  and readiness checked before the Task is submitted. A name string does not
+  provision a Workspace. A shared writable Workspace is unacceptable unless
+  the server proves each Task receives an isolated workspace instance.
 - Worker skills are explicit IDs. The local catalog checks availability and
   the existing runner supplies selected packages. AX Workspace skill registry
   semantics differ; publishing and pinning skill versions require later work.
@@ -139,7 +154,7 @@ Task is created.
 
 ## Migration phases
 
-1. **Local skeleton (this change):** domain, deterministic planner, backend
+1. **Local skeleton:** domain, deterministic planner, backend
    port, legacy bridge, guarded AX mapper, trace vocabulary, config switch,
    and unit tests. Existing API paths remain on the legacy composition.
 2. **Server integration:** establish AX gRPC transport and pin a tested AX
