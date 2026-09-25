@@ -22,6 +22,11 @@ class RuntimeDriver(str, Enum):
     KATA = "kata"
 
 
+class OrchestrationBackend(str, Enum):
+    LEGACY = "legacy"
+    AX = "ax"
+
+
 def _required(environment: Mapping[str, str], name: str) -> str:
     value = environment.get(name)
     if not isinstance(value, str) or not value.strip():
@@ -200,8 +205,16 @@ class ApplicationSettings:
     chat_max_history_page_size: int = 50
     stream_heartbeat_seconds: float = 15.0
     stream_send_timeout_seconds: float = 10.0
+    orchestration_backend: OrchestrationBackend = OrchestrationBackend.LEGACY
+    ax_atespace: str | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.orchestration_backend, OrchestrationBackend):
+            raise ConfigurationError("UAR_ORCHESTRATION_BACKEND must be legacy or ax")
+        if self.orchestration_backend is OrchestrationBackend.AX:
+            if not self.ax_atespace:
+                raise ConfigurationError("AX requires atespace configuration")
+            _identifier({"UAR_AX_ATESPACE": self.ax_atespace}, "UAR_AX_ATESPACE")
         if type(self.java_development_enabled) is not bool:
             raise ConfigurationError(
                 "UAR_JAVA_DEVELOPMENT_ENABLED must be true or false"
@@ -336,6 +349,13 @@ class ApplicationSettings:
             raise ConfigurationError(
                 "UAR_RUNTIME_DRIVER must be docker or kata"
             ) from None
+        backend_name = values.get("UAR_ORCHESTRATION_BACKEND", "legacy").lower()
+        try:
+            backend = OrchestrationBackend(backend_name)
+        except ValueError:
+            raise ConfigurationError(
+                "UAR_ORCHESTRATION_BACKEND must be legacy or ax"
+            ) from None
         network_mode = _required(values, "UAR_DOCKER_NETWORK_MODE").lower()
         if network_mode not in {"none", "bridge"}:
             raise ConfigurationError("UAR_DOCKER_NETWORK_MODE must be none or bridge")
@@ -377,6 +397,8 @@ class ApplicationSettings:
             api_host=_required(values, "UAR_API_HOST"),
             api_port=_port(values, "UAR_API_PORT"),
             runtime_driver=driver,
+            orchestration_backend=backend,
+            ax_atespace=values.get("UAR_AX_ATESPACE") or None,
             docker_workload_key=_required(values, "UAR_DOCKER_WORKLOAD_KEY"),
             docker_image=_required(values, "UAR_DOCKER_WORKLOAD_IMAGE"),
             docker_command=_command(values),

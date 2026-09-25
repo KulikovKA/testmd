@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from universal_agent_runtime.adapters.docker_agent_qwen import DockerAgentQwenRunner
+from universal_agent_runtime.adapters.ax_orchestrator import AXConfiguration, AXOrchestrator
+from universal_agent_runtime.adapters.legacy_worker_orchestrator import LegacyWorkerOrchestrator
 from universal_agent_runtime.adapters.docker_development_workspace import (
     DockerDevelopmentWorkspaceAdapter,
 )
@@ -50,6 +52,7 @@ from universal_agent_runtime.application.ports.agent_interaction import (
 )
 from universal_agent_runtime.application.ports.agent_repository import AgentRepository
 from universal_agent_runtime.application.ports.agent_runtime import AgentRuntime
+from universal_agent_runtime.application.ports.orchestration import WorkerOrchestrator
 from universal_agent_runtime.application.ports.development_workspace import (
     DevelopmentWorkspacePort,
 )
@@ -65,7 +68,8 @@ from universal_agent_runtime.application.ports.workspace_inventory import (
     WorkspaceInventoryReader,
 )
 from universal_agent_runtime.application.skill_management import SkillManagementService
-from universal_agent_runtime.configuration import ApplicationSettings, RuntimeDriver
+from universal_agent_runtime.configuration import ApplicationSettings, OrchestrationBackend, RuntimeDriver
+from universal_agent_runtime.domain.orchestration import WorkerResources
 
 
 @dataclass(frozen=True)
@@ -85,6 +89,7 @@ class ApplicationComposition:
     development: DevelopmentWorkflow | None = None
     development_workspace: DevelopmentWorkspacePort | None = None
     trusted_git: TrustedGitPort | None = None
+    orchestration: WorkerOrchestrator | None = None
     package_name: str = "universal_agent_runtime"
 
     async def close(self) -> None:
@@ -210,6 +215,19 @@ def compose_application(
             secrets,
             trusted_git,
         )
+    orchestration: WorkerOrchestrator
+    if settings.orchestration_backend is OrchestrationBackend.AX:
+        orchestration = AXOrchestrator(AXConfiguration(
+            atespace=settings.ax_atespace or "",
+            image=settings.docker_image,
+            command=settings.docker_command,
+            workspace_path=settings.docker_workspace_target,
+        ))
+    else:
+        orchestration = LegacyWorkerOrchestrator(
+            lifecycle, chat, settings.runtime_driver,
+            WorkerResources(settings.agent_cpu_cores, settings.agent_memory_bytes, 128),
+        )
     return ApplicationComposition(
         settings,
         runtime,
@@ -221,6 +239,7 @@ def compose_application(
         development=development,
         development_workspace=development_workspace,
         trusted_git=trusted_git,
+        orchestration=orchestration,
         debug_reader=interaction if isinstance(interaction, AgentDebugReader) else None,
         llm_turns_reader=interaction
         if isinstance(interaction, AgentLLMTurnsReader)
