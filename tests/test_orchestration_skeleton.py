@@ -1,6 +1,7 @@
 """Local orchestration checks requiring no Docker, AX, or Kubernetes service."""
 
 import asyncio
+import re
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -229,7 +230,8 @@ def test_legacy_bridge_uses_existing_lifecycle_and_chat():
         await adapter.delete("worker-1")
 
     asyncio.run(exercise())
-    assert lifecycle.commands[0].request_id == "worker-1"
+    request_id = lifecycle.commands[0].request_id
+    assert re.fullmatch(r"worker-[0-9a-f]{32}", request_id)
 
 
 @pytest.mark.parametrize("failure_point", ["start", "chat", "result"])
@@ -335,7 +337,7 @@ def test_legacy_bridge_retries_cleanup_when_initial_cleanup_fails():
         assert "worker-1" in adapter._agents
         assert adapter._statuses["worker-1"] is WorkerStatus.FAILED
         assert await adapter.submit(worker("worker-1")) is WorkerStatus.COMPLETED
-        assert "worker-1" not in adapter._agents
+        assert adapter._agents["worker-1"] == AgentId("agent-2")
 
     asyncio.run(exercise())
     assert lifecycle.creates == 2
