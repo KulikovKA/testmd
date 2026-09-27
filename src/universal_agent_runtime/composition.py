@@ -45,6 +45,7 @@ from universal_agent_runtime.application.agent_lifecycle import (
 )
 from universal_agent_runtime.application.development_tasks import DevelopmentTaskService
 from universal_agent_runtime.application.development_workflow import DevelopmentWorkflow
+from universal_agent_runtime.application.execution_graph_executor import ExecutionGraphExecutor
 from universal_agent_runtime.application.ports.agent_interaction import (
     AgentDebugReader,
     AgentInteraction,
@@ -68,6 +69,7 @@ from universal_agent_runtime.application.ports.workspace_inventory import (
     WorkspaceInventoryReader,
 )
 from universal_agent_runtime.application.skill_management import SkillManagementService
+from universal_agent_runtime.application.static_coordinator import StaticCoordinator
 from universal_agent_runtime.configuration import ApplicationSettings, OrchestrationBackend, RuntimeDriver
 from universal_agent_runtime.domain.orchestration import WorkerResources
 
@@ -91,6 +93,8 @@ class ApplicationComposition:
     trusted_git: TrustedGitPort | None = None
     orchestration: WorkerOrchestrator | None = None
     package_name: str = "universal_agent_runtime"
+    coordinator: StaticCoordinator | None = None
+    graph_executor: ExecutionGraphExecutor | None = None
 
     async def close(self) -> None:
         """Close owned adapters once the application lifespan ends."""
@@ -228,6 +232,8 @@ def compose_application(
             lifecycle, chat, settings.runtime_driver,
             WorkerResources(settings.agent_cpu_cores, settings.agent_memory_bytes, 128),
         )
+    coordinator = StaticCoordinator()
+    graph_executor = ExecutionGraphExecutor(orchestration)
     return ApplicationComposition(
         settings,
         runtime,
@@ -240,6 +246,8 @@ def compose_application(
         development_workspace=development_workspace,
         trusted_git=trusted_git,
         orchestration=orchestration,
+        coordinator=coordinator,
+        graph_executor=graph_executor,
         debug_reader=interaction if isinstance(interaction, AgentDebugReader) else None,
         llm_turns_reader=interaction
         if isinstance(interaction, AgentLLMTurnsReader)

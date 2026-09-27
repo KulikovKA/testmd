@@ -37,7 +37,8 @@ and Qwen process do not receive those private key mounts.
 flowchart TD
     User[UserTask] --> Coordinator[Coordinator]
     Coordinator --> Graph[ExecutionGraph]
-    Graph --> Orchestrator[WorkerOrchestrator port]
+    Graph --> Executor[ExecutionGraphExecutor]
+    Executor --> Orchestrator[WorkerOrchestrator port]
     Orchestrator --> Legacy[Legacy worker adapter]
     Orchestrator --> AX[AX adapter / future gRPC transport]
     Legacy --> Docker[Existing Agent lifecycle and DockerRuntime]
@@ -95,11 +96,16 @@ placement attestor absent, so AX submit fails before any Task is created.
 1. A UserTask is created with a high-level specification.
 2. The Coordinator returns an ExecutionGraph. The initial coordinator is
    deterministic: architect, developer, then tester and reviewer.
-3. Runnable workers have all dependencies completed. A failed dependency
-   blocks descendants; no blocked worker is submitted.
-4. The Orchestrator submits a worker to the selected backend, observes and
-   records status, and later aggregates results. Retry and review policy will
-   belong above the infrastructure adapter.
+3. `ExecutionGraphExecutor` owns the small application event loop around
+   `runnable_workers()`: it marks every runnable worker RUNNING, submits the
+   set concurrently, records terminal outcomes, then checks the graph again.
+   A failed dependency blocks descendants; no blocked worker is submitted.
+4. `WorkerOrchestrator` owns one worker's infrastructure submission and
+   lifecycle. `WorkerCompletionReader` separately returns a typed
+   `WorkerResult`; an AX Task phase such as `Running` is not a Qwen command
+   result. The executor aggregates successful results, failures, and blocked
+   worker IDs. The empty graph returns an empty successful aggregate. Retry
+   and review policy will belong above the infrastructure adapter.
 5. In legacy mode, the optional bridge creates a separate Agent, starts it,
    sends the goal through the existing chat turn, and records the response.
    On start, chat, or result failure it stops and deletes the Agent before
@@ -114,8 +120,11 @@ placement attestor absent, so AX submit fails before any Task is created.
    to its Substrate Actor and verify that actor's microVM placement. A
    pre-admission result cannot prove actual Kata execution. AX submission
    remains disabled because the current adapter cannot hold the worker before
-   command execution while that post-launch attestation is performed. AX
-   status alone also cannot reliably establish command completion, so result
+   command execution while that post-launch attestation is performed. The
+   `AXExecutionGate` protocol names the required server boundary (create a
+   held Task, attest placement, then release or discard); it is a UAR contract
+   and not a claim that current upstream exposes those operations. AX status
+   alone also cannot reliably establish command completion, so result
    aggregation needs a separate trusted completion protocol.
 
 ## Security, workspaces, skills, Git, and observability

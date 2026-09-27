@@ -34,6 +34,19 @@ class AXWorkspaceRegistry(Protocol):
     async def workspace_is_ready(self, atespace: str, workspace_name: str) -> bool: ...
 
 
+class AXExecutionGate(Protocol):
+    """Required server boundary; this is a UAR contract, not a current AX API.
+
+    A conforming server implementation must create a Task held before its
+    command starts, permit attestation of its actual Actor placement, then
+    release it. Current upstream APIs have not been confirmed to provide this.
+    """
+
+    async def create_held_task(self, task_manifest: dict) -> str: ...
+    async def release_task(self, atespace: str, task_name: str) -> None: ...
+    async def discard_held_task(self, atespace: str, task_name: str) -> None: ...
+
+
 @dataclass(frozen=True)
 class AXConfiguration:
     atespace: str

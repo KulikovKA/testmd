@@ -8,6 +8,7 @@ from universal_agent_runtime.application.agent_lifecycle import AgentLifecycleSe
 from universal_agent_runtime.configuration import RuntimeDriver
 from universal_agent_runtime.domain.orchestration import WorkerResources, WorkerSpec, WorkerStatus
 from universal_agent_runtime.domain.agent import AgentLifecycleState
+from universal_agent_runtime.application.ports.orchestration import WorkerResult
 
 
 class LegacyWorkerOrchestrator:
@@ -72,6 +73,14 @@ class LegacyWorkerOrchestrator:
 
     async def status(self, worker_id: str) -> WorkerStatus:
         return self._statuses[worker_id]
+
+    async def get_result(self, worker_id: str) -> WorkerResult:
+        """Read command outcome independently from the Agent lifecycle status."""
+        if worker_id in self.results:
+            return WorkerResult(worker_id, result=self.results[worker_id])
+        if self._statuses.get(worker_id) is WorkerStatus.FAILED:
+            return WorkerResult(worker_id, failure="worker_execution_failed")
+        raise KeyError(worker_id)
 
     async def watch(self, worker_id: str) -> AsyncIterator[WorkerStatus]:
         yield await self.status(worker_id)
